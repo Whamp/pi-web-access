@@ -265,8 +265,6 @@ function resolveProvider(
 	return provider;
 }
 
-const pendingFetches = new Map<string, AbortController>();
-let sessionActive = false;
 let widgetVisible = false;
 let widgetUnsubscribe: (() => void) | null = null;
 const pendingCurates = new Map<string, PendingCurate>();
@@ -302,6 +300,10 @@ interface PendingCurate {
 
 
 const MAX_INLINE_CONTENT = 30000; // Content returned directly to agent
+
+function isStaleExtensionContextError(error: unknown): boolean {
+	return error instanceof Error && error.message.includes("extension ctx is stale");
+}
 
 function stripThumbnails(results: ExtractedContent[]): ExtractedContent[] {
 	return results.map(({ thumbnail, frames, ...rest }) => rest);
@@ -345,13 +347,6 @@ function formatFullResults(queryData: QueryResultData): string {
 		output += `### ${r.title}\n${r.url}\n\n`;
 	}
 	return output;
-}
-
-function abortPendingFetches(): void {
-	for (const controller of pendingFetches.values()) {
-		controller.abort();
-	}
-	pendingFetches.clear();
 }
 
 function closeCurator(callId?: string): void {
@@ -535,70 +530,97 @@ function formatEntryLine(
 	return `${typeStr.padEnd(4)} ${target.padEnd(32)} ${statusStr.padStart(5)} ${duration.padStart(5)} ${indicator}`;
 }
 
-function handleSessionChange(ctx: ExtensionContext): void {
-	abortPendingFetches();
-	closeCurator();
-	clearCloneCache();
-	sessionActive = true;
-	restoreFromSession(ctx);
-	// Unsubscribe before clear() to avoid callback with stale ctx
-	widgetUnsubscribe?.();
-	widgetUnsubscribe = null;
-	activityMonitor.clear();
-	if (widgetVisible) {
-		// Re-subscribe with new ctx
-		widgetUnsubscribe = activityMonitor.onUpdate(() => updateWidget(ctx));
-		updateWidget(ctx);
-	}
-}
-
 export default function (pi: ExtensionAPI) {
 	const initConfig = loadConfigForExtensionInit();
 	const curateKey = initConfig.shortcuts?.curate || DEFAULT_SHORTCUTS.curate;
 	const activityKey = initConfig.shortcuts?.activity || DEFAULT_SHORTCUTS.activity;
+	const pendingFetches = new Map<string, AbortController>();
+	let sessionActive = false;
+
+	function abortPendingFetches(): void {
+		for (const controller of pendingFetches.values()) {
+			controller.abort();
+		}
+		pendingFetches.clear();
+	}
+
+	function handleSessionChange(ctx: ExtensionContext): void {
+		abortPendingFetches();
+		closeCurator();
+		clearCloneCache();
+		sessionActive = true;
+		restoreFromSession(ctx);
+		// Unsubscribe before clear() to avoid callback with stale ctx
+		widgetUnsubscribe?.();
+		widgetUnsubscribe = null;
+		activityMonitor.clear();
+		if (widgetVisible) {
+			// Re-subscribe with new ctx
+			widgetUnsubscribe = activityMonitor.onUpdate(() => updateWidget(ctx));
+			updateWidget(ctx);
+		}
+	}
+
+	async function fetchAndPublishInBackground(
+		fetchId: string,
+		urls: string[],
+		controller: AbortController,
+	): Promise<void> {
+		try {
+			const fetched = await fetchAllContent(urls, controller.signal);
+			if (!sessionActive || !pendingFetches.has(fetchId)) return;
+			const data: StoredSearchData = {
+				id: fetchId,
+				type: "fetch",
+				timestamp: Date.now(),
+				urls: stripThumbnails(fetched),
+			};
+			pi.appendEntry("web-search-results", data);
+			storeResult(fetchId, data);
+			const ok = fetched.filter(f => !f.error).length;
+			pi.sendMessage(
+				{
+					customType: "web-search-content-ready",
+					content: `Content fetched for ${ok}/${fetched.length} URLs [${fetchId}]. Full page content now available.`,
+					display: true,
+				},
+				{ triggerTurn: true },
+			);
+		} catch (error) {
+			if (isStaleExtensionContextError(error)) {
+				sessionActive = false;
+				abortPendingFetches();
+				return;
+			}
+			if (!sessionActive || !pendingFetches.has(fetchId)) return;
+			const message = error instanceof Error ? error.message : String(error);
+			const isAbort = (error instanceof Error && error.name === "AbortError") || message.toLowerCase().includes("abort");
+			if (isAbort) return;
+			try {
+				pi.sendMessage(
+					{
+						customType: "web-search-error",
+						content: `Content fetch failed [${fetchId}]: ${message}`,
+						display: true,
+					},
+					{ triggerTurn: false },
+				);
+			} catch {
+				// The runtime cannot safely publish further background notifications.
+				sessionActive = false;
+				abortPendingFetches();
+			}
+		} finally {
+			pendingFetches.delete(fetchId);
+		}
+	}
 
 	function startBackgroundFetch(urls: string[]): string | null {
 		if (urls.length === 0) return null;
 		const fetchId = generateId();
 		const controller = new AbortController();
 		pendingFetches.set(fetchId, controller);
-		fetchAllContent(urls, controller.signal)
-			.then((fetched) => {
-				if (!sessionActive || !pendingFetches.has(fetchId)) return;
-				const data: StoredSearchData = {
-					id: fetchId,
-					type: "fetch",
-					timestamp: Date.now(),
-					urls: stripThumbnails(fetched),
-				};
-				storeResult(fetchId, data);
-				pi.appendEntry("web-search-results", data);
-				const ok = fetched.filter(f => !f.error).length;
-				pi.sendMessage(
-					{
-						customType: "web-search-content-ready",
-						content: `Content fetched for ${ok}/${fetched.length} URLs [${fetchId}]. Full page content now available.`,
-						display: true,
-					},
-					{ triggerTurn: true },
-				);
-			})
-			.catch((err) => {
-				if (!sessionActive || !pendingFetches.has(fetchId)) return;
-				const message = err instanceof Error ? err.message : String(err);
-				const isAbort = (err instanceof Error && err.name === "AbortError") || message.toLowerCase().includes("abort");
-				if (!isAbort) {
-					pi.sendMessage(
-						{
-							customType: "web-search-error",
-							content: `Content fetch failed [${fetchId}]: ${message}`,
-							display: true,
-						},
-						{ triggerTurn: false },
-					);
-				}
-			})
-			.finally(() => { pendingFetches.delete(fetchId); });
+		void fetchAndPublishInBackground(fetchId, urls, controller);
 		return fetchId;
 	}
 
