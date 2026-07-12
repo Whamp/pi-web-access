@@ -4,11 +4,29 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { Check } from "typebox/value";
 
 const codingAgentEntry = fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"));
 const loaderUrl = pathToFileURL(join(dirname(codingAgentEntry), "core/extensions/loader.js"));
 const { createExtensionRuntime, loadExtensionsCached } = await import(loaderUrl.href);
 const extensionPath = fileURLToPath(new URL("../index.ts", import.meta.url));
+const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+const originalBraveKey = process.env.BRAVE_API_KEY;
+const originalFetch = globalThis.fetch;
+const activeRuntimes = new Set();
+
+function restoreEnvironmentVariable(name, value) {
+	if (value === undefined) delete process.env[name];
+	else process.env[name] = value;
+}
+
+test.afterEach(async () => {
+	for (const runtime of activeRuntimes) await runtime.shutdown();
+	activeRuntimes.clear();
+	restoreEnvironmentVariable("PI_CODING_AGENT_DIR", originalAgentDir);
+	restoreEnvironmentVariable("BRAVE_API_KEY", originalBraveKey);
+	globalThis.fetch = originalFetch;
+});
 
 async function loadRuntime(config = {}) {
 	const configDir = await mkdtemp(join(tmpdir(), "pi-web-access-agent-workflow-"));
@@ -51,15 +69,18 @@ async function loadRuntime(config = {}) {
 		sessionManager: { getBranch: () => [] },
 		ui: { setWidget() {}, notify(message, level) { notifications.push({ message, level }); } },
 	};
-	return {
+	const loadedRuntime = {
 		extension,
 		context,
 		notifications,
 		sent,
 		async shutdown() {
 			for (const handler of extension.handlers.get("session_shutdown") ?? []) await handler({}, context);
+			activeRuntimes.delete(loadedRuntime);
 		},
 	};
+	activeRuntimes.add(loadedRuntime);
+	return loadedRuntime;
 }
 
 function installSearchResponse() {
@@ -85,17 +106,37 @@ test("web_search defaults to non-curated execution even when UI is available", a
 	const runtime = await loadRuntime();
 	const tool = runtime.extension.tools.get("web_search")?.definition;
 	assert.ok(tool);
-	assert.deepEqual(tool.parameters.properties.workflow.enum, ["none", "auto-summary"]);
+	assert.equal(Check(tool.parameters, { query: "agent search", workflow: "none" }), true);
+	assert.equal(Check(tool.parameters, { query: "agent search", workflow: "auto-summary" }), true);
 
 	const result = await executeSearch(runtime, { query: "agent search", provider: "brave" });
 	assert.match(result.content[0].text, /Article/);
 	assert.equal(runtime.notifications.length, 0);
 });
 
-test("legacy summary-review input executes without curation and returns a compatibility warning", async () => {
+test("registered schema accepts legacy summary-review without advertising it", async () => {
+	const runtime = await loadRuntime();
+	const tool = runtime.extension.tools.get("web_search")?.definition;
+	assert.ok(tool);
+
+	assert.equal(Check(tool.parameters, { query: "legacy search", workflow: "summary-review" }), true);
+	assert.doesNotMatch(JSON.stringify(tool.parameters.properties.workflow), /summary-review/);
+});
+
+test("legacy bridged summary-review input executes without curation and returns a compatibility warning", async () => {
+	installSearchResponse();
+	const runtime = await loadRuntime();
+	const result = await executeSearch(runtime, { query: "legacy search", provider: "brave", workflow: "summary-review" });
+
+	assert.match(result.content[0].text, /Compatibility warning:.*summary-review.*non-curated/i);
+	assert.match(result.content[0].text, /Article/);
+	assert.equal(runtime.notifications.length, 0);
+});
+
+test("legacy saved summary-review config executes without curation and returns a compatibility warning", async () => {
 	installSearchResponse();
 	const runtime = await loadRuntime({ workflow: "summary-review" });
-	const result = await executeSearch(runtime, { query: "legacy search", provider: "brave", workflow: "summary-review" });
+	const result = await executeSearch(runtime, { query: "legacy search", provider: "brave" });
 
 	assert.match(result.content[0].text, /Compatibility warning:.*summary-review.*non-curated/i);
 	assert.match(result.content[0].text, /Article/);

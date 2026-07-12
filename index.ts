@@ -1260,11 +1260,9 @@ export default function (pi: ExtensionAPI) {
 			provider: Type.Optional(
 				StringEnum(["auto", "openai", "brave", "parallel", "tavily", "exa", "perplexity", "gemini"], { description: "Search provider (default: auto)" }),
 			),
-			workflow: Type.Optional(
-				StringEnum(["none", "auto-summary"], {
-					description: "Search workflow mode: none = raw results (default), auto-summary = generate a summary before returning",
-				}),
-			),
+			workflow: Type.Optional(Type.String({
+				description: 'Search workflow mode: "none" = raw results (default), "auto-summary" = generate a summary before returning',
+			})),
 		}),
 
 		async execute(callId, params, signal, onUpdate, ctx) {
