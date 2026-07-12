@@ -455,3 +455,67 @@ test("provider-inline and retrieved content share one ordered continuation ident
 	assert.match(inline.content[0].text, /Provider supplied content/);
 	assert.match(missing.content[0].text, /# Missing/);
 });
+
+test("mixed inline, retrieved, failed, timed-out, and duplicate sources share one ordered continuation", async () => {
+	const runtime = await createRuntime("mixed-outcomes");
+	process.env.EXA_API_KEY = "exa-test-key";
+	const deadline = new AbortController();
+	const timeoutFetch = deferred();
+	const originalTimeout = AbortSignal.timeout;
+	AbortSignal.timeout = () => deadline.signal;
+	const contentRequests = [];
+	let requestsAfterDeadline = 0;
+	let deadlinePassed = false;
+	globalThis.fetch = async (url) => {
+		const requestUrl = String(url);
+		if (deadlinePassed) requestsAfterDeadline += 1;
+		if (requestUrl === "https://api.exa.ai/search") {
+			return new Response(JSON.stringify({ results: [
+				{ title: "Inline", url: "https://example.com/inline", text: "# Inline\nProvider supplied content" },
+				{ title: "Success", url: "http://127.0.0.1/success" },
+				{ title: "Failure", url: "http://127.0.0.1/failure" },
+				{ title: "Timeout", url: "http://127.0.0.1/timeout" },
+				{ title: "Success duplicate", url: "http://127.0.0.1/success#duplicate" },
+			] }), { status: 200, headers: { "content-type": "application/json" } });
+		}
+		contentRequests.push(requestUrl);
+		if (requestUrl === "https://r.jina.ai/http://127.0.0.1/success") return jinaResponse("http://127.0.0.1/success", "Success");
+		if (requestUrl === "https://r.jina.ai/http://127.0.0.1/failure") return new Response("failed", { status: 502, statusText: "Bad Gateway" });
+		if (requestUrl === "http://127.0.0.1/failure") return new Response("failed", { status: 502, statusText: "Bad Gateway" });
+		if (requestUrl === "https://r.jina.ai/http://127.0.0.1/timeout") return timeoutFetch.promise;
+		throw new Error(`Unexpected fetch: ${requestUrl}`);
+	};
+
+	try {
+		const execution = tool(runtime.extension, "web_search").execute(
+			"mixed-outcome-search",
+			{ query: "mixed outcomes", provider: "exa", workflow: "none", includeContent: true },
+			undefined,
+			undefined,
+			runtime.context,
+		);
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		deadlinePassed = true;
+		deadline.abort(new DOMException("deadline", "TimeoutError"));
+		const result = await settlesWithin(execution, "mixed content deadline");
+
+		assert.equal(contentRequests.some((url) => url.includes("example.com/inline")), false);
+		assert.equal(contentRequests.filter((url) => url === "https://r.jina.ai/http://127.0.0.1/success").length, 1);
+		assert.equal(result.details.contentReady, 2);
+		assert.equal(result.details.contentErrors, 2);
+		const inline = await tool(runtime.extension, "get_search_content").execute("mixed-inline", { responseId: result.details.fetchId, urlIndex: 0 });
+		const success = await tool(runtime.extension, "get_search_content").execute("mixed-success", { responseId: result.details.fetchId, urlIndex: 1 });
+		const failure = await tool(runtime.extension, "get_search_content").execute("mixed-failure", { responseId: result.details.fetchId, urlIndex: 2 });
+		const timeout = await tool(runtime.extension, "get_search_content").execute("mixed-timeout", { responseId: result.details.fetchId, urlIndex: 3 });
+		const duplicate = await tool(runtime.extension, "get_search_content").execute("mixed-duplicate", { responseId: result.details.fetchId, urlIndex: 4 });
+		assert.match(inline.content[0].text, /Provider supplied content/);
+		assert.match(success.content[0].text, /# Success/);
+		assert.match(failure.details.error, /HTTP 502/);
+		assert.match(timeout.details.error, /timed out after 60 seconds/);
+		assert.equal(duplicate.details.error, "Index out of range");
+		assert.equal(runtime.sent.length, 0);
+		await assertNoLateEffects(runtime, [], () => timeoutFetch.resolve(jinaResponse("http://127.0.0.1/timeout", "Timeout")), () => requestsAfterDeadline);
+	} finally {
+		AbortSignal.timeout = originalTimeout;
+	}
+});

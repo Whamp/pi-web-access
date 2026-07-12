@@ -121,8 +121,12 @@ web_search({ query: "release notes", workflow: "auto-summary" })
 | `recencyFilter` | `day`, `week`, `month`, or `year` |
 | `domainFilter` | Include domains; prefix a domain with `-` to exclude it |
 | `provider` | `auto`, `openai`, `exa`, `brave`, `parallel`, `tavily`, `perplexity`, or `gemini` |
-| `includeContent` | Fetch complete source content |
+| `includeContent` | Fetch complete source content before the tool returns |
 | `workflow` | `none` (default) or `auto-summary` |
+
+With `includeContent: true`, `web_search` runs a bounded 60-second content phase before returning. It retains provider-supplied inline content and retrieves only missing sources, de-duplicated in first-result order. A deadline returns completed content plus a local timeout error for each unfinished source.
+
+The result details expose one continuation as `fetchId`, with `contentReady` and `contentErrors` counts for the merged set. Call `get_search_content` immediately with that `fetchId`; no background fetch or delayed follow-up is pending.
 
 ### `fetch_content`
 
