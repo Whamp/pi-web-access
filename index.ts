@@ -313,12 +313,6 @@ function formatQueryHeader(query: string, provider: string | undefined, duplicat
 	return `## Query: "${query}"${suffix}\n\n`;
 }
 
-function hasFullInlineCoverage(urls: string[], inlineContent: ExtractedContent[] | undefined): boolean {
-	if (!inlineContent || inlineContent.length === 0) return false;
-	const coveredUrls = new Set(inlineContent.map(c => c.url));
-	return urls.every(url => coveredUrls.has(url));
-}
-
 function formatFullResults(queryData: QueryResultData): string {
 	let output = `## Results for: "${queryData.query}"\n\n`;
 	if (queryData.answer) {
@@ -515,21 +509,19 @@ export default function (pi: ExtensionAPI) {
 	const initConfig = loadConfigForExtensionInit();
 	const curateKey = initConfig.shortcuts?.curate || DEFAULT_SHORTCUTS.curate;
 	const activityKey = initConfig.shortcuts?.activity || DEFAULT_SHORTCUTS.activity;
-	const pendingFetches = new Map<string, AbortController>();
-	let sessionActive = false;
+	const activeSearches = new Map<string, AbortController>();
 
-	function abortPendingFetches(): void {
-		for (const controller of pendingFetches.values()) {
-			controller.abort();
+	function abortActiveSearches(): void {
+		for (const controller of activeSearches.values()) {
+			controller.abort(new DOMException("Web search cancelled because the session changed.", "AbortError"));
 		}
-		pendingFetches.clear();
+		activeSearches.clear();
 	}
 
 	function handleSessionChange(ctx: ExtensionContext): void {
-		abortPendingFetches();
+		abortActiveSearches();
 		closeCurator();
 		clearCloneCache();
-		sessionActive = true;
 		restoreFromSession(ctx);
 		// Unsubscribe before clear() to avoid callback with stale ctx
 		widgetUnsubscribe?.();
@@ -568,70 +560,75 @@ export default function (pi: ExtensionAPI) {
 		};
 	}
 
-	async function fetchAndPublishInBackground(
-		fetchId: string,
-		urls: string[],
-		controller: AbortController,
-	): Promise<void> {
+	const CONTENT_DEADLINE_MS = 60_000;
+	const CONTENT_TIMEOUT_ERROR = "Content retrieval timed out after 60 seconds";
+
+	function normalizeSourceUrl(url: string): string {
 		try {
-			const fetched = await fetchAllContent(urls, controller.signal);
-			if (!sessionActive || !pendingFetches.has(fetchId)) return;
-			const data: StoredSearchData = {
-				id: fetchId,
-				type: "fetch",
-				timestamp: Date.now(),
-				urls: stripThumbnails(fetched),
-			};
-			if (!publishStoredResult(data)) {
-				sessionActive = false;
-				abortPendingFetches();
-				return;
-			}
-			const ok = fetched.filter(f => !f.error).length;
-			pi.sendMessage(
-				{
-					customType: "web-search-content-ready",
-					content: `Content fetched for ${ok}/${fetched.length} URLs [${fetchId}]. Full page content now available.`,
-					display: true,
-				},
-				{ triggerTurn: true },
-			);
-		} catch (error) {
-			if (isStaleExtensionContextError(error)) {
-				sessionActive = false;
-				abortPendingFetches();
-				return;
-			}
-			if (!sessionActive || !pendingFetches.has(fetchId)) return;
-			const message = error instanceof Error ? error.message : String(error);
-			const isAbort = (error instanceof Error && error.name === "AbortError") || message.toLowerCase().includes("abort");
-			if (isAbort) return;
-			try {
-				pi.sendMessage(
-					{
-						customType: "web-search-error",
-						content: `Content fetch failed [${fetchId}]: ${message}`,
-						display: true,
-					},
-					{ triggerTurn: false },
-				);
-			} catch {
-				// The runtime cannot safely publish further background notifications.
-				sessionActive = false;
-				abortPendingFetches();
-			}
-		} finally {
-			pendingFetches.delete(fetchId);
+			const parsed = new URL(url);
+			parsed.hash = "";
+			parsed.hostname = parsed.hostname.toLowerCase();
+			if ((parsed.protocol === "https:" && parsed.port === "443") || (parsed.protocol === "http:" && parsed.port === "80")) parsed.port = "";
+			return parsed.toString();
+		} catch {
+			return url;
 		}
 	}
 
-	function startBackgroundFetch(urls: string[]): string | null {
-		if (urls.length === 0) return null;
-		const fetchId = generateId();
-		const controller = new AbortController();
-		pendingFetches.set(fetchId, controller);
-		void fetchAndPublishInBackground(fetchId, urls, controller);
-		return fetchId;
+	async function retrieveTerminalContent(
+		urls: string[],
+		inlineContent: ExtractedContent[],
+		executionSignal: AbortSignal,
+		onUpdate: ((update: { content: Array<{ type: "text"; text: string }>; details: Record<string, unknown> }) => void) | undefined,
+	): Promise<ExtractedContent[]> {
+		const inlineByUrl = new Map<string, ExtractedContent>();
+		for (const item of inlineContent) {
+			const key = normalizeSourceUrl(item.url);
+			if (!inlineByUrl.has(key)) inlineByUrl.set(key, item);
+		}
+		const orderedUrls = new Map<string, string>();
+		for (const url of urls) {
+			const key = normalizeSourceUrl(url);
+			if (!orderedUrls.has(key)) orderedUrls.set(key, url);
+		}
+		const results = new Map<string, ExtractedContent>();
+		for (const [key, item] of inlineByUrl) {
+			const resultUrl = orderedUrls.get(key);
+			if (resultUrl) results.set(key, { ...item, url: resultUrl });
+		}
+		const missing = [...orderedUrls].filter(([key]) => !results.has(key));
+		let completed = [...results.values()].filter(item => !item.error).length;
+		let failed = [...results.values()].filter(item => item.error).length;
+		const reportProgress = (): void => {
+			const remaining = orderedUrls.size - completed - failed;
+			onUpdate?.({
+				content: [{ type: "text", text: `Fetching content: ${completed} completed, ${failed} failed, ${remaining} remaining...` }],
+				details: { phase: "content", completed, failed, remaining, progress: orderedUrls.size === 0 ? 1 : (completed + failed) / orderedUrls.size },
+			});
+		};
+		reportProgress();
+		if (missing.length > 0) {
+			const deadlineSignal = AbortSignal.timeout(CONTENT_DEADLINE_MS);
+			const contentSignal = AbortSignal.any([executionSignal, deadlineSignal]);
+			await Promise.all(missing.map(async ([key, url]) => {
+				const [item] = await fetchAllContent([url], contentSignal);
+				const timedOut = deadlineSignal.aborted && !executionSignal.aborted;
+				const result = timedOut
+					? { url, title: item?.title ?? "", content: item?.content ?? "", error: CONTENT_TIMEOUT_ERROR }
+					: (item ?? { url, title: "", content: "", error: "Content retrieval failed" });
+				results.set(key, result);
+				if (result.error) failed += 1;
+				else completed += 1;
+				reportProgress();
+			}));
+		}
+		if (executionSignal.aborted) throw executionSignal.reason;
+		return [...orderedUrls.keys()].map(key => results.get(key) ?? {
+			url: orderedUrls.get(key) ?? key,
+			title: "",
+			content: "",
+			error: CONTENT_TIMEOUT_ERROR,
+		});
 	}
 
 	function storeAndPublishSearch(results: QueryResultData[]): string | null {
@@ -900,33 +897,26 @@ export default function (pi: ExtensionAPI) {
 			}
 		}
 
-		const hasInlineReady = hasFullInlineCoverage(opts.urls, opts.inlineContent);
 		let fetchId: string | null = null;
-		if (hasInlineReady && opts.inlineContent) {
+		const storedContent = opts.includeContent ? opts.inlineContent : undefined;
+		if (storedContent) {
 			fetchId = generateId();
 			const data: StoredSearchData = {
 				id: fetchId,
 				type: "fetch",
 				timestamp: Date.now(),
-				urls: opts.inlineContent,
+				urls: stripThumbnails(storedContent),
 			};
 			if (!publishStoredResult(data)) return buildSessionChangedCancellation();
-			if (!hasApprovedSummary) {
-				output += `---\nFull content for ${opts.inlineContent.length} sources available [${fetchId}].`;
-			}
-		} else if (opts.includeContent) {
-			fetchId = startBackgroundFetch(opts.urls);
-			if (fetchId && !hasApprovedSummary) {
-				output += `---\nContent fetching in background [${fetchId}]. Will notify when ready.`;
-			}
+			if (!hasApprovedSummary) output += `---\nFull content for ${storedContent.filter(item => !item.error).length}/${storedContent.length} sources available [${fetchId}].`;
 		}
 
 		const searchId = storeAndPublishSearch(opts.results);
 		if (searchId === null) return buildSessionChangedCancellation();
-		const isBackgroundFetch = fetchId !== null && !hasInlineReady;
 
+		const content: Array<{ type: "text"; text: string }> = [{ type: "text", text: output.trim() }];
 		return {
-			content: [{ type: "text", text: output.trim() }],
+			content,
 			details: {
 				queries: opts.queryList,
 				queryCount: opts.queryList.length,
@@ -934,7 +924,8 @@ export default function (pi: ExtensionAPI) {
 				totalResults: tr,
 				includeContent: opts.includeContent,
 				fetchId,
-				fetchUrls: isBackgroundFetch ? opts.urls : undefined,
+				contentReady: storedContent?.filter(item => !item.error).length ?? 0,
+				contentErrors: storedContent?.filter(item => item.error).length ?? 0,
 				searchId,
 				...(opts.curated ? {
 					curated: true,
@@ -1256,8 +1247,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_tree", async (_event, ctx) => handleSessionChange(ctx));
 
 	pi.on("session_shutdown", () => {
-		sessionActive = false;
-		abortPendingFetches();
+		abortActiveSearches();
 		closeCurator();
 		clearCloneCache();
 		clearResults();
@@ -1272,14 +1262,14 @@ export default function (pi: ExtensionAPI) {
 		name: "web_search",
 		label: "Web Search",
 		description:
-			`Search the web using OpenAI, Brave, Parallel, Tavily, Exa, Perplexity, or Gemini. Returns an AI-synthesized answer with source citations. OpenAI web_search uses a Codex subscription or OpenAI API key. For comprehensive research, prefer queries (plural) with 2-4 varied angles over a single query — each query gets its own synthesized answer, so varying phrasing and scope gives much broader coverage. When includeContent is true, full page content is fetched in the background. Agent searches never open the browser curator; use /websearch for deliberate browser curation or workflow "auto-summary" for a model-generated summary. Provider auto-selects: OpenAI when suitable and available, then Exa, Brave, Parallel, Tavily, Perplexity, Gemini API, then Gemini Web.`,
+			`Search the web using OpenAI, Brave, Parallel, Tavily, Exa, Perplexity, or Gemini. Returns an AI-synthesized answer with source citations. OpenAI web_search uses a Codex subscription or OpenAI API key. For comprehensive research, prefer queries (plural) with 2-4 varied angles over a single query — each query gets its own synthesized answer, so varying phrasing and scope gives much broader coverage. When includeContent is true, full page content is fetched before the tool returns. Agent searches never open the browser curator; use /websearch for deliberate browser curation or workflow "auto-summary" for a model-generated summary. Provider auto-selects: OpenAI when suitable and available, then Exa, Brave, Parallel, Tavily, Perplexity, Gemini API, then Gemini Web.`,
 		promptSnippet:
 			"Use for web research questions. Prefer {queries:[...]} with 2-4 varied angles over a single query for broader coverage.",
 		parameters: Type.Object({
 			query: Type.Optional(Type.String({ description: "Single search query. For research tasks, prefer 'queries' with multiple varied angles instead." })),
 			queries: Type.Optional(Type.Array(Type.String(), { description: "Multiple queries searched in sequence, each returning its own synthesized answer. Prefer this for research — vary phrasing, scope, and angle across 2-4 queries to maximize coverage. Good: ['React vs Vue performance benchmarks 2026', 'React vs Vue developer experience comparison', 'React ecosystem size vs Vue ecosystem']. Bad: ['React vs Vue', 'React vs Vue comparison', 'React vs Vue review'] (too similar, redundant results)." })),
 			numResults: Type.Optional(Type.Number({ description: "Results per query (default: 5, max: 20)" })),
-			includeContent: Type.Optional(Type.Boolean({ description: "Fetch full page content (async)" })),
+			includeContent: Type.Optional(Type.Boolean({ description: "Fetch full page content before returning" })),
 			recencyFilter: Type.Optional(
 				StringEnum(["day", "week", "month", "year"], { description: "Filter by recency" }),
 			),
@@ -1293,6 +1283,10 @@ export default function (pi: ExtensionAPI) {
 		}),
 
 		async execute(callId, params, signal, onUpdate, ctx) {
+			const sessionController = new AbortController();
+			activeSearches.set(callId, sessionController);
+			const executionSignal = signal ? AbortSignal.any([signal, sessionController.signal]) : sessionController.signal;
+			try {
 			const rawQueryList: unknown[] = Array.isArray(params.queries)
 				? params.queries
 				: (params.query !== undefined ? [params.query] : []);
@@ -1328,7 +1322,7 @@ export default function (pi: ExtensionAPI) {
 						recencyFilter: params.recencyFilter,
 						domainFilter: params.domainFilter,
 						includeContent: params.includeContent,
-						signal,
+						signal: executionSignal,
 						extensionContext: ctx,
 					});
 
@@ -1340,6 +1334,7 @@ export default function (pi: ExtensionAPI) {
 					}
 					if (inlineContent) allInlineContent.push(...inlineContent);
 				} catch (err) {
+					if (executionSignal.aborted) throw executionSignal.reason;
 					const message = err instanceof Error ? err.message : String(err);
 					const requestedProvider = typeof resolvedProvider === "string" && resolvedProvider !== "auto"
 						? resolvedProvider
@@ -1368,17 +1363,20 @@ export default function (pi: ExtensionAPI) {
 					isProjectTrusted: () => ctx.isProjectTrusted(),
 				};
 				const summaryModelChoices = await loadSummaryModelChoices(summaryContext);
-				const generated = await generateSummaryDraft(searchResults, summaryContext, signal, summaryModelChoices.defaultSummaryModel ?? undefined);
+				const generated = await generateSummaryDraft(searchResults, summaryContext, executionSignal, summaryModelChoices.defaultSummaryModel ?? undefined);
 				approvedSummary = generated.summary;
 				summaryMeta = generated.meta;
 			}
 
+			const terminalContent = params.includeContent
+				? await retrieveTerminalContent(allUrls, allInlineContent, executionSignal, onUpdate)
+				: undefined;
 			const searchReturn = buildSearchReturn({
 				queryList,
 				results: searchResults,
 				urls: allUrls,
 				includeContent: params.includeContent ?? false,
-				inlineContent: allInlineContent.length > 0 ? allInlineContent : undefined,
+				inlineContent: terminalContent,
 				workflow: workflow === "auto-summary" ? "auto-summary" : undefined,
 				approvedSummary,
 				summaryMeta,
@@ -1388,6 +1386,12 @@ export default function (pi: ExtensionAPI) {
 				if (textPart) textPart.text = `${resolvedWorkflow.compatibilityWarning}\n\n${textPart.text}`;
 			}
 			return searchReturn;
+			} catch (error) {
+				if (sessionController.signal.aborted) return buildSessionChangedCancellation();
+				throw error;
+			} finally {
+				activeSearches.delete(callId);
+			}
 		},
 
 		renderCall(args, theme) {
@@ -1429,7 +1433,8 @@ export default function (pi: ExtensionAPI) {
 				totalResults?: number;
 				error?: string;
 				fetchId?: string;
-				fetchUrls?: string[];
+				contentReady?: number;
+				contentErrors?: number;
 				phase?: string;
 				progress?: number;
 				currentQuery?: string;
@@ -1512,10 +1517,8 @@ export default function (pi: ExtensionAPI) {
 			if (details?.curated && details?.curatedFrom) {
 				statusLine += theme.fg("muted", ` (${details.queryCount}/${details.curatedFrom} queries curated)`);
 			}
-			if (details?.fetchId && details?.fetchUrls) {
-				statusLine += theme.fg("muted", ` (fetching ${details.fetchUrls.length} URLs)`);
-			} else if (details?.fetchId) {
-				statusLine += theme.fg("muted", " (content ready)");
+			if (details?.fetchId) {
+				statusLine += theme.fg("muted", ` (${details.contentReady ?? 0} content ready, ${details.contentErrors ?? 0} errors)`);
 			}
 
 			// Build expanded lines first so collapsed view can reference total count
@@ -1578,21 +1581,6 @@ export default function (pi: ExtensionAPI) {
 				const preview = textContent.length > 500 ? textContent.slice(0, 500) + "..." : textContent;
 				for (const line of preview.split("\n")) {
 					lines.push(theme.fg("dim", line));
-				}
-			}
-
-			if (details?.fetchUrls && details.fetchUrls.length > 0) {
-				if (details.curated) {
-					lines.push(theme.fg("muted", `Fetching ${details.fetchUrls.length} URLs in background`));
-				} else {
-					lines.push(theme.fg("muted", "Fetching:"));
-					for (const u of details.fetchUrls.slice(0, 5)) {
-						const display = u.length > 60 ? u.slice(0, 57) + "..." : u;
-						lines.push(theme.fg("dim", "  " + display));
-					}
-					if (details.fetchUrls.length > 5) {
-						lines.push(theme.fg("dim", `  ... and ${details.fetchUrls.length - 5} more`));
-					}
 				}
 			}
 
