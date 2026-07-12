@@ -2,6 +2,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Box, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { StringEnum, complete, type Model } from "@earendil-works/pi-ai/compat";
+import { settleWithAbort } from "./abort.ts";
 import { fetchAllContent, type ExtractedContent } from "./extract.ts";
 import { normalizeFetchContentParams } from "./fetch-params.ts";
 import { clearCloneCache } from "./github-extract.ts";
@@ -611,8 +612,14 @@ export default function (pi: ExtensionAPI) {
 			const deadlineSignal = AbortSignal.timeout(CONTENT_DEADLINE_MS);
 			const contentSignal = AbortSignal.any([executionSignal, deadlineSignal]);
 			await Promise.all(missing.map(async ([key, url]) => {
-				const [item] = await fetchAllContent([url], contentSignal);
-				const timedOut = deadlineSignal.aborted && !executionSignal.aborted;
+				let item: ExtractedContent | undefined;
+				try {
+					[item] = await settleWithAbort(() => fetchAllContent([url], contentSignal), contentSignal);
+				} catch (error) {
+					if (executionSignal.aborted) throw executionSignal.reason;
+					if (!deadlineSignal.aborted) throw error;
+				}
+				const timedOut = deadlineSignal.aborted;
 				const result = timedOut
 					? { url, title: item?.title ?? "", content: item?.content ?? "", error: CONTENT_TIMEOUT_ERROR }
 					: (item ?? { url, title: "", content: "", error: "Content retrieval failed" });

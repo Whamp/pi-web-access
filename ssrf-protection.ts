@@ -1,15 +1,18 @@
 import { lookup as dnsLookup } from "node:dns/promises";
 import net from "node:net";
 
+import { abortReason, settleWithAbort } from "./abort.ts";
+
 const DEFAULT_MAX_REDIRECTS = 5;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
 export type LookupAddress = { address: string; family: number };
-export type Lookup = (hostname: string) => Promise<LookupAddress[]>;
+export type Lookup = (hostname: string, options?: { signal?: AbortSignal }) => Promise<LookupAddress[]>;
 type Fetch = typeof fetch;
 
 interface ValidationOptions {
 	lookup?: Lookup;
+	signal?: AbortSignal;
 	/**
 	 * CIDR ranges (e.g. "198.18.0.0/15") to exempt from the SSRF guard.
 	 * Useful when a host runs a TUN/fake-IP proxy (Surge, Clash, Mihomo, ...)
@@ -55,8 +58,10 @@ export async function validateRemoteUrl(rawUrl: string | URL, options: Validatio
 
 	let addresses: LookupAddress[];
 	try {
-		addresses = await (options.lookup ?? defaultLookup)(hostname);
+		const lookup = options.lookup ?? defaultLookup;
+		addresses = await settleWithAbort(() => lookup(hostname, { signal: options.signal }), options.signal);
 	} catch (err) {
+		if (options.signal?.aborted) throw abortReason(options.signal);
 		const message = err instanceof Error ? err.message : String(err);
 		throw new Error(`Failed to resolve ${hostname}: ${message}`);
 	}
@@ -75,18 +80,21 @@ export async function fetchRemoteUrl(
 ): Promise<Response> {
 	const fetchImpl = options.fetch ?? fetch;
 	const maxRedirects = options.maxRedirects ?? DEFAULT_MAX_REDIRECTS;
-	let current = await validateRemoteUrl(url, options);
 	let requestInit = init;
+	let current = await validateRemoteUrl(url, { ...options, signal: requestInit.signal ?? undefined });
 
 	for (let redirects = 0; redirects <= maxRedirects; redirects++) {
-		const response = await fetchImpl(current, { ...requestInit, redirect: "manual" });
+		const response = await settleWithAbort(
+			() => fetchImpl(current, { ...requestInit, redirect: "manual" }),
+			requestInit.signal,
+		);
 		if (!REDIRECT_STATUSES.has(response.status)) return response;
 
 		const location = response.headers.get("location");
 		if (!location) return response;
 		if (redirects === maxRedirects) throw new Error(`Too many redirects fetching ${current.toString()}`);
 
-		current = await validateRemoteUrl(new URL(location, current), options);
+		current = await validateRemoteUrl(new URL(location, current), { ...options, signal: requestInit.signal ?? undefined });
 		if (response.status === 303 || ((response.status === 301 || response.status === 302) && requestInit.method?.toUpperCase() === "POST")) {
 			const { body: _body, ...nextInit } = requestInit;
 			requestInit = { ...nextInit, method: "GET" };

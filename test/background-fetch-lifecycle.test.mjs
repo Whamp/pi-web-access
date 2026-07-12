@@ -18,6 +18,41 @@ function deferred() {
 	return { promise, resolve };
 }
 
+async function settlesWithin(promise, label) {
+	let timeoutId;
+	try {
+		return await Promise.race([
+			promise,
+			new Promise((_resolve, reject) => {
+				timeoutId = setTimeout(() => reject(new Error(`${label} did not settle promptly`)), 100);
+			}),
+		]);
+	} finally {
+		clearTimeout(timeoutId);
+	}
+}
+
+async function assertNoLateEffects(runtime, updates, releaseLateStep, requestCount) {
+	const entryCount = runtime.entries.length;
+	const messageCount = runtime.sent.length;
+	const updateCount = updates.length;
+	const unhandled = [];
+	const onUnhandled = (error) => unhandled.push(error);
+	process.on("unhandledRejection", onUnhandled);
+	try {
+		releaseLateStep();
+		await new Promise((resolve) => setImmediate(resolve));
+		await new Promise((resolve) => setImmediate(resolve));
+	} finally {
+		process.removeListener("unhandledRejection", onUnhandled);
+	}
+	assert.equal(runtime.entries.length, entryCount, "late retrieval must not store or publish");
+	assert.equal(runtime.sent.length, messageCount, "late retrieval must not send a message or trigger a turn");
+	assert.equal(updates.length, updateCount, "late retrieval must not report progress");
+	assert.equal(requestCount(), 0, "late retrieval must not start another request");
+	assert.deepEqual(unhandled, [], "late retrieval must not reject without a handler");
+}
+
 async function createRuntime(label) {
 	const configDir = await mkdtemp(join(tmpdir(), `pi-web-access-terminal-${label}-`));
 	await writeFile(join(configDir, "web-search.json"), JSON.stringify({
@@ -162,23 +197,23 @@ test("web search without full content skips the content phase", async () => {
 	assert.equal(updates.some((update) => update.details?.phase === "content"), false);
 });
 
-test("content deadline retains completed sources and stores per-source timeout errors", async () => {
+test("content deadline retains completed sources and terminally abandons a non-settling source", async () => {
 	const runtime = await createRuntime("deadline");
 	const deadline = new AbortController();
+	const slowFetch = deferred();
 	const originalTimeout = AbortSignal.timeout;
 	AbortSignal.timeout = () => deadline.signal;
 	const updates = [];
-	globalThis.fetch = async (url, options) => {
+	let requestsAfterDeadline = 0;
+	let deadlinePassed = false;
+	globalThis.fetch = async (url) => {
 		const requestUrl = String(url);
+		if (deadlinePassed) requestsAfterDeadline += 1;
 		if (requestUrl.startsWith("https://api.search.brave.com/res/v1/web/search")) {
 			return braveSearchResponse(["http://127.0.0.1/fast", "http://127.0.0.1/slow"]);
 		}
 		if (requestUrl === "https://r.jina.ai/http://127.0.0.1/fast") return jinaResponse("http://127.0.0.1/fast", "Fast");
-		if (requestUrl === "https://r.jina.ai/http://127.0.0.1/slow") {
-			return new Promise((_resolve, reject) => {
-				options.signal.addEventListener("abort", () => reject(options.signal.reason), { once: true });
-			});
-		}
+		if (requestUrl === "https://r.jina.ai/http://127.0.0.1/slow") return slowFetch.promise;
 		throw new Error(`Unexpected fetch: ${requestUrl}`);
 	};
 	try {
@@ -190,8 +225,9 @@ test("content deadline retains completed sources and stores per-source timeout e
 			runtime.context,
 		);
 		await new Promise((resolve) => setTimeout(resolve, 20));
+		deadlinePassed = true;
 		deadline.abort(new DOMException("deadline", "TimeoutError"));
-		const result = await execution;
+		const result = await settlesWithin(execution, "content deadline");
 
 		assert.equal(result.details.contentReady, 1);
 		assert.equal(result.details.contentErrors, 1);
@@ -200,21 +236,25 @@ test("content deadline retains completed sources and stores per-source timeout e
 		assert.match(fast.content[0].text, /# Fast/);
 		assert.match(slow.details.error, /timed out after 60 seconds/);
 		assert.ok(updates.some((update) => update.details?.phase === "content" && update.details.completed === 1 && update.details.failed === 1 && update.details.remaining === 0));
+		await assertNoLateEffects(runtime, updates, () => slowFetch.resolve(jinaResponse("http://127.0.0.1/slow", "Slow")), () => requestsAfterDeadline);
 	} finally {
 		AbortSignal.timeout = originalTimeout;
 	}
 });
 
-test("caller cancellation stops terminal content without later publication or messages", async () => {
+test("caller cancellation terminally abandons a non-settling content step", async () => {
 	const runtime = await createRuntime("caller-cancel");
 	const controller = new AbortController();
 	const callerReason = new Error("caller cancelled");
-	globalThis.fetch = async (url, options) => {
+	const slowFetch = deferred();
+	const updates = [];
+	let requestsAfterCancellation = 0;
+	let cancelled = false;
+	globalThis.fetch = async (url) => {
 		const requestUrl = String(url);
+		if (cancelled) requestsAfterCancellation += 1;
 		if (requestUrl.startsWith("https://api.search.brave.com/res/v1/web/search")) return braveSearchResponse(["http://127.0.0.1/slow"]);
-		if (requestUrl === "https://r.jina.ai/http://127.0.0.1/slow") {
-			return new Promise((_resolve, reject) => options.signal.addEventListener("abort", () => reject(options.signal.reason), { once: true }));
-		}
+		if (requestUrl === "https://r.jina.ai/http://127.0.0.1/slow") return slowFetch.promise;
 		throw new Error(`Unexpected fetch: ${requestUrl}`);
 	};
 
@@ -222,25 +262,29 @@ test("caller cancellation stops terminal content without later publication or me
 		"cancel-search",
 		{ query: "cancel content", provider: "brave", workflow: "none", includeContent: true },
 		controller.signal,
-		undefined,
+		(update) => updates.push(update),
 		runtime.context,
 	);
 	await new Promise((resolve) => setTimeout(resolve, 20));
+	cancelled = true;
 	controller.abort(callerReason);
-	await assert.rejects(execution, (error) => error === callerReason);
-	await new Promise((resolve) => setImmediate(resolve));
+	await assert.rejects(settlesWithin(execution, "caller cancellation"), (error) => error === callerReason);
 	assert.deepEqual(runtime.entries, []);
 	assert.deepEqual(runtime.sent, []);
+	await assertNoLateEffects(runtime, updates, () => slowFetch.resolve(jinaResponse("http://127.0.0.1/slow", "Slow")), () => requestsAfterCancellation);
 });
 
-test("session replacement cancels active terminal content with a clean outcome", async () => {
+test("session replacement terminally abandons a non-settling content step", async () => {
 	const runtime = await createRuntime("session-change");
-	globalThis.fetch = async (url, options) => {
+	const slowFetch = deferred();
+	const updates = [];
+	let requestsAfterCancellation = 0;
+	let cancelled = false;
+	globalThis.fetch = async (url) => {
 		const requestUrl = String(url);
+		if (cancelled) requestsAfterCancellation += 1;
 		if (requestUrl.startsWith("https://api.search.brave.com/res/v1/web/search")) return braveSearchResponse(["http://127.0.0.1/slow"]);
-		if (requestUrl === "https://r.jina.ai/http://127.0.0.1/slow") {
-			return new Promise((_resolve, reject) => options.signal.addEventListener("abort", () => reject(options.signal.reason), { once: true }));
-		}
+		if (requestUrl === "https://r.jina.ai/http://127.0.0.1/slow") return slowFetch.promise;
 		throw new Error(`Unexpected fetch: ${requestUrl}`);
 	};
 
@@ -248,19 +292,55 @@ test("session replacement cancels active terminal content with a clean outcome",
 		"session-search",
 		{ query: "session content", provider: "brave", workflow: "none", includeContent: true },
 		undefined,
-		undefined,
+		(update) => updates.push(update),
 		runtime.context,
 	);
 	await new Promise((resolve) => setTimeout(resolve, 20));
+	cancelled = true;
 	for (const handler of runtime.extension.handlers.get("session_tree") ?? []) {
 		await handler({}, runtime.context);
 	}
-	const result = await execution;
+	const result = await settlesWithin(execution, "session replacement");
 	assert.equal(result.details.cancelled, true);
 	assert.equal(result.details.cancelReason, "session-changed");
 	assert.doesNotMatch(result.content[0].text, /stale/i);
 	assert.deepEqual(runtime.entries, []);
 	assert.deepEqual(runtime.sent, []);
+	await assertNoLateEffects(runtime, updates, () => slowFetch.resolve(jinaResponse("http://127.0.0.1/slow", "Slow")), () => requestsAfterCancellation);
+});
+
+test("shutdown terminally abandons a non-settling content step", async () => {
+	const runtime = await createRuntime("shutdown");
+	const slowFetch = deferred();
+	const updates = [];
+	let requestsAfterCancellation = 0;
+	let cancelled = false;
+	globalThis.fetch = async (url) => {
+		const requestUrl = String(url);
+		if (cancelled) requestsAfterCancellation += 1;
+		if (requestUrl.startsWith("https://api.search.brave.com/res/v1/web/search")) return braveSearchResponse(["http://127.0.0.1/slow"]);
+		if (requestUrl === "https://r.jina.ai/http://127.0.0.1/slow") return slowFetch.promise;
+		throw new Error(`Unexpected fetch: ${requestUrl}`);
+	};
+
+	const execution = tool(runtime.extension, "web_search").execute(
+		"shutdown-search",
+		{ query: "shutdown content", provider: "brave", workflow: "none", includeContent: true },
+		undefined,
+		(update) => updates.push(update),
+		runtime.context,
+	);
+	await new Promise((resolve) => setTimeout(resolve, 20));
+	cancelled = true;
+	for (const handler of runtime.extension.handlers.get("session_shutdown") ?? []) {
+		await handler({});
+	}
+	const result = await settlesWithin(execution, "session shutdown");
+	assert.equal(result.details.cancelled, true);
+	assert.equal(result.details.cancelReason, "session-changed");
+	assert.deepEqual(runtime.entries, []);
+	assert.deepEqual(runtime.sent, []);
+	await assertNoLateEffects(runtime, updates, () => slowFetch.resolve(jinaResponse("http://127.0.0.1/slow", "Slow")), () => requestsAfterCancellation);
 });
 
 test("duplicate source URLs are fetched and stored once in first-result order", async () => {
