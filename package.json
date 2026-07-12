@@ -43,6 +43,20 @@
     "@earendil-works/pi-tui": "*",
     "typebox": "*"
   },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-ai": {
+      "optional": true
+    },
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "@earendil-works/pi-tui": {
+      "optional": true
+    },
+    "typebox": {
+      "optional": true
+    }
+  },
   "pi": {
     "extensions": [
       "./index.ts"
@@ -53,6 +67,10 @@
     "video": "https://github.com/Whamp/pi-web-access/raw/refs/heads/main/pi-web-fetch-demo.mp4"
   },
   "devDependencies": {
-    "fast-check": "^4.9.0"
+    "@earendil-works/pi-ai": "0.80.6",
+    "@earendil-works/pi-coding-agent": "0.80.6",
+    "@earendil-works/pi-tui": "0.80.6",
+    "fast-check": "^4.9.0",
+    "typebox": "1.1.38"
   }
 }
