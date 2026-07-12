@@ -61,7 +61,7 @@ web_search({ query: "TypeScript error handling" })
 web_search({
   queries: ["React compiler status", "React compiler migration guide"],
   provider: "auto",
-  workflow: "summary-review",
+  workflow: "auto-summary",
 })
 
 fetch_content({ url: "https://docs.example.com/guide" })
@@ -121,8 +121,8 @@ web_search({ query: "release notes", workflow: "auto-summary" })
 | `recencyFilter` | `day`, `week`, `month`, or `year` |
 | `domainFilter` | Include domains; prefix a domain with `-` to exclude it |
 | `provider` | `auto`, `openai`, `exa`, `brave`, `parallel`, `tavily`, `perplexity`, or `gemini` |
-| `includeContent` | Fetch complete source content in the background |
-| `workflow` | `none`, `summary-review`, or `auto-summary` |
+| `includeContent` | Fetch complete source content |
+| `workflow` | `none` (default) or `auto-summary` |
 
 ### `fetch_content`
 
@@ -202,16 +202,15 @@ Use the equivalent packages on Linux or Windows. `ffmpeg` extracts frames and th
 
 ## Search curator
 
-The default `summary-review` workflow opens a local browser page, streams search results, and lets you select sources before approving a summary. Use `auto-summary` to generate a summary without opening the curator. `none` returns raw results.
+Agent `web_search` calls never open the browser curator. They return raw results by default; use `auto-summary` to generate a summary before the tool returns. Run `/websearch` when you deliberately want a local browser page for selecting results and approving summaries.
+
+Legacy saved or bridged `summary-review` values map to non-curated raw results and return a compatibility warning.
 
 Commands:
 
 ```text
 /websearch                         open the curator
 /websearch query one, query two    open it with queries
-/curator                           toggle the review workflow
-/curator summary-review            enable browser review
-/curator off                       return raw results
 /search                            browse stored results
 /google-account                    show the Gemini Web account
 ```
@@ -240,7 +239,7 @@ Configuration lives at `~/.pi/web-search.json`, or under `PI_CODING_AGENT_DIR` /
   "allowBrowserCookies": false,
   "searchModel": "gemini-2.5-flash",
   "summaryModel": "openai-codex/gpt-5.3-codex-spark",
-  "workflow": "summary-review",
+  "workflow": "none",
   "curatorTimeoutSeconds": 20,
   "githubClone": {
     "enabled": true,
