@@ -1,6 +1,7 @@
 {
   "name": "pi-web-access",
   "version": "0.13.0",
+  "private": true,
   "description": "Web search, URL fetching, GitHub repo cloning, PDF extraction, YouTube video understanding, and local video analysis for Pi coding agent. Supports OpenAI, Brave, Parallel, Tavily, Exa, Perplexity, and Gemini.",
   "type": "module",
   "scripts": {
@@ -16,16 +17,19 @@
     "fetch",
     "scraping"
   ],
-  "author": "Nico Bailon",
+  "author": "Whamp",
+  "contributors": [
+    "Nico Bailon"
+  ],
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/nicobailon/pi-web-access.git"
+    "url": "git+https://github.com/Whamp/pi-web-access.git"
   },
   "bugs": {
-    "url": "https://github.com/nicobailon/pi-web-access/issues"
+    "url": "https://github.com/Whamp/pi-web-access/issues"
   },
-  "homepage": "https://github.com/nicobailon/pi-web-access#readme",
+  "homepage": "https://github.com/Whamp/pi-web-access#readme",
   "dependencies": {
     "@mozilla/readability": "^0.6.0",
     "linkedom": "^0.16.0",
@@ -46,7 +50,7 @@
     "skills": [
       "./skills"
     ],
-    "video": "https://github.com/nicobailon/pi-web-access/raw/refs/heads/main/pi-web-fetch-demo.mp4"
+    "video": "https://github.com/Whamp/pi-web-access/raw/refs/heads/main/pi-web-fetch-demo.mp4"
   },
   "devDependencies": {
     "fast-check": "^4.9.0"

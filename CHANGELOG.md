@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+- Established `Whamp/pi-web-access` as an independent hard fork with its own roadmap.
+- Centralized provider eligibility, strict named-provider behavior, and automatic fallback policy in `web-search.ts`.
+- Switched installation and project metadata to the GitHub repository.
+
+### Removed
+- Removed npm distribution and installation instructions. The package is private and installed directly from GitHub.
+
 ## [0.13.0] - 2026-06-25
 
 ### Added
