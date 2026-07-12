@@ -5,6 +5,30 @@ import { fetchRemoteUrl, validateRemoteUrl } from "../ssrf-protection.ts";
 
 const publicLookup = async () => [{ address: "93.184.216.34", family: 4 }];
 
+function deferred() {
+	let resolve;
+	let reject;
+	const promise = new Promise((resolvePromise, rejectPromise) => {
+		resolve = resolvePromise;
+		reject = rejectPromise;
+	});
+	return { promise, resolve, reject };
+}
+
+async function settlesWithin(promise, label) {
+	let timeoutId;
+	try {
+		return await Promise.race([
+			promise,
+			new Promise((_resolve, reject) => {
+				timeoutId = setTimeout(() => reject(new Error(`${label} did not settle promptly`)), 100);
+			}),
+		]);
+	} finally {
+		clearTimeout(timeoutId);
+	}
+}
+
 async function rejectsInternal(url) {
 	await assert.rejects(
 		validateRemoteUrl(url, { lookup: publicLookup }),
@@ -54,6 +78,28 @@ test("validateRemoteUrl permits public HTTP and HTTPS targets", async () => {
 	assert.equal((await validateRemoteUrl("https://example.com/path", { lookup: publicLookup })).hostname, "example.com");
 	assert.equal((await validateRemoteUrl("http://93.184.216.34/")).hostname, "93.184.216.34");
 	assert.equal((await validateRemoteUrl("https://[2606:2800:220:1:248:1893:25c8:1946]/")).hostname, "[2606:2800:220:1:248:1893:25c8:1946]");
+});
+
+test("validateRemoteUrl abandons a non-settling DNS lookup on cancellation", async () => {
+	const lookupGate = deferred();
+	const controller = new AbortController();
+	const reason = new DOMException("cancelled", "AbortError");
+	const validation = validateRemoteUrl("https://example.test/", {
+		lookup: () => lookupGate.promise,
+		signal: controller.signal,
+	});
+	controller.abort(reason);
+	await assert.rejects(settlesWithin(validation, "DNS cancellation"), (error) => error === reason);
+	const unhandled = [];
+	const onUnhandled = (error) => unhandled.push(error);
+	process.on("unhandledRejection", onUnhandled);
+	try {
+		lookupGate.reject(new Error("late DNS failure"));
+		await new Promise((resolve) => setImmediate(resolve));
+	} finally {
+		process.removeListener("unhandledRejection", onUnhandled);
+	}
+	assert.deepEqual(unhandled, []);
 });
 
 test("fetchRemoteUrl validates redirect targets before following", async () => {

@@ -3,6 +3,7 @@ import { parseHTML } from "linkedom";
 import TurndownService from "turndown";
 import pLimit from "p-limit";
 import { activityMonitor } from "./activity.ts";
+import { settleWithAbort } from "./abort.ts";
 import { extractRSCContent } from "./rsc-extract.ts";
 import { extractPDFToMarkdown, isPDF } from "./pdf-extract.ts";
 import { extractGitHub } from "./github-extract.ts";
@@ -120,24 +121,25 @@ async function extractWithJinaReader(
 	const activityId = activityMonitor.logStart({ type: "api", query: `jina: ${url}` });
 
 	try {
-		await validateRemoteUrl(url, { allowRanges: loadSsrfAllowRanges(), lookup });
-		const res = await fetch(jinaUrl, {
+		const requestSignal = AbortSignal.any([
+			AbortSignal.timeout(JINA_TIMEOUT_MS),
+			...(signal ? [signal] : []),
+		]);
+		await validateRemoteUrl(url, { allowRanges: loadSsrfAllowRanges(), lookup, signal: requestSignal });
+		const res = await settleWithAbort(() => fetch(jinaUrl, {
 			headers: {
 				"Accept": "text/markdown",
 				"X-No-Cache": "true",
 			},
-			signal: AbortSignal.any([
-				AbortSignal.timeout(JINA_TIMEOUT_MS),
-				...(signal ? [signal] : []),
-			]),
-		});
+			signal: requestSignal,
+		}), requestSignal);
 
 		if (!res.ok) {
 			activityMonitor.logComplete(activityId, res.status);
 			return null;
 		}
 
-		const content = await res.text();
+		const content = await settleWithAbort(() => res.text(), requestSignal);
 		activityMonitor.logComplete(activityId, res.status);
 
 		const contentStart = content.indexOf("Markdown Content:");
@@ -407,7 +409,7 @@ export async function extractContent(
 	try {
 		const parsed = new URL(url);
 		if (parsed.protocol === "http:" || parsed.protocol === "https:") {
-			await validateRemoteUrl(parsed, { allowRanges: loadSsrfAllowRanges(), lookup: options?.lookup });
+			await validateRemoteUrl(parsed, { allowRanges: loadSsrfAllowRanges(), lookup: options?.lookup, signal });
 		}
 	} catch (err) {
 		return { url, title: "", content: "", error: errorMessage(err) };
@@ -557,7 +559,7 @@ async function extractViaHttp(
 					"Upgrade-Insecure-Requests": "1",
 				},
 			},
-			{ allowRanges: loadSsrfAllowRanges(), lookup: options?.lookup },
+			{ allowRanges: loadSsrfAllowRanges(), lookup: options?.lookup, signal: controller.signal },
 		);
 
 		if (!response.ok) {
@@ -589,8 +591,11 @@ async function extractViaHttp(
 
 		if (isPDFContent) {
 			try {
-				const buffer = await response.arrayBuffer();
-				const result = await extractPDFToMarkdown(buffer, url);
+				const buffer = await settleWithAbort(() => response.arrayBuffer(), controller.signal);
+				const result = await settleWithAbort(
+					() => extractPDFToMarkdown(buffer, url, { signal: controller.signal }),
+					controller.signal,
+				);
 				activityMonitor.logComplete(activityId, response.status);
 				return {
 					url,
@@ -599,6 +604,7 @@ async function extractViaHttp(
 					error: null,
 				};
 			} catch (err) {
+				if (controller.signal.aborted) throw err;
 				const message = err instanceof Error ? err.message : String(err);
 				activityMonitor.logError(activityId, message);
 				return { url, title: "", content: "", error: `PDF extraction failed: ${message}` };
@@ -619,7 +625,7 @@ async function extractViaHttp(
 			};
 		}
 
-		const text = await response.text();
+		const text = await settleWithAbort(() => response.text(), controller.signal);
 		const isHTML = contentType.includes("text/html") || contentType.includes("application/xhtml+xml");
 
 		if (!isHTML) {
@@ -700,5 +706,13 @@ export async function fetchAllContent(
 	signal?: AbortSignal,
 	options?: ExtractOptions,
 ): Promise<ExtractedContent[]> {
-	return Promise.all(urls.map((url) => fetchLimit(() => extractContent(url, signal, options))));
+	return Promise.all(urls.map((url) => fetchLimit(async () => {
+		if (signal?.aborted) return abortedResult(url);
+		try {
+			return await settleWithAbort(() => extractContent(url, signal, options), signal);
+		} catch (error) {
+			if (signal?.aborted) return abortedResult(url);
+			throw error;
+		}
+	})));
 }
