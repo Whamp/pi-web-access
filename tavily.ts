@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { activityMonitor } from "./activity.ts";
 import type { ExtractedContent } from "./extract.ts";
-import type { SearchOptions, SearchResponse } from "./perplexity.ts";
+import type { SearchOptions, SearchProviderAdapter, SearchResponse } from "./search-provider.ts";
 import { getWebSearchConfigPath } from "./utils.ts";
 
 const TAVILY_API_URL = "https://api.tavily.com/search";
@@ -203,3 +203,12 @@ export async function searchWithTavily(query: string, options: TavilySearchOptio
 	}
 	return result;
 }
+
+export const tavilySearchProvider: SearchProviderAdapter<"tavily"> = {
+	name: "tavily",
+	label: "Tavily",
+	eligibility: () => isTavilyAvailable()
+		? { eligible: true }
+		: { eligible: false, reason: "Tavily API key is not configured." },
+	search: ({ query, options }) => searchWithTavily(query, options),
+};

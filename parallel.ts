@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { activityMonitor } from "./activity.ts";
 import type { ExtractedContent, ExtractOptions } from "./extract.ts";
-import type { SearchOptions, SearchResponse } from "./perplexity.ts";
+import type { SearchOptions, SearchProviderAdapter, SearchResponse } from "./search-provider.ts";
 import { getWebSearchConfigPath } from "./utils.ts";
 
 const PARALLEL_SEARCH_URL = "https://api.parallel.ai/v1/search";
@@ -358,3 +358,12 @@ async function parallelFetch(
 		throw new Error(`Parallel API returned invalid JSON: ${errorMessage(err)}`);
 	}
 }
+
+export const parallelSearchProvider: SearchProviderAdapter<"parallel"> = {
+	name: "parallel",
+	label: "Parallel",
+	eligibility: () => isParallelAvailable()
+		? { eligible: true }
+		: { eligible: false, reason: "Parallel API key is not configured." },
+	search: ({ query, options }) => searchWithParallel(query, options),
+};

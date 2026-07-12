@@ -18,7 +18,7 @@ https://github.com/user-attachments/assets/cac6a17a-1eeb-4dde-9818-cdf85d8ea98f
 
 **Video Understanding** — Point it at a YouTube video or local screen recording and ask questions about what's on screen. Full transcripts, visual descriptions, and frame extraction at exact timestamps.
 
-**Smart Fallbacks** — Every capability has a fallback chain. Search tries OpenAI when suitable and available, then Exa, Brave, Parallel, Tavily, Perplexity, Gemini API, and Gemini Web when browser cookies are enabled. YouTube tries Gemini Web when enabled, then API, then Perplexity. Blocked pages retry through Jina Reader, Parallel, and Gemini extraction. Something always works.
+**Smart Fallbacks** — Automatic search tries OpenAI when suitable and eligible, then Exa, Brave, Parallel, Tavily, Perplexity, and Gemini. Named providers are strict: they never silently switch providers when credentials are removed or an attempt fails. YouTube tries Gemini Web when enabled, then API, then Perplexity. Blocked pages retry through Jina Reader, Parallel, and Gemini extraction.
 
 **GitHub Cloning** — GitHub URLs are cloned locally instead of scraped. The agent gets real file contents and a local path to explore, not rendered HTML.
 
@@ -40,7 +40,7 @@ Works immediately with no API keys — Exa MCP provides zero-config search. If P
 }
 ```
 
-In `auto` mode (default), `web_search` tries OpenAI when suitable and available, then Exa (direct API if keyed, MCP if not), Brave, Parallel, Tavily, Perplexity, Gemini API, then Gemini Web when browser-cookie access is enabled.
+In `auto` mode (default), `web_search` tries eligible providers in order: OpenAI when the result-count and recency policy permits it, Exa (direct API if keyed, MCP if not), Brave, Parallel, Tavily, Perplexity, then Gemini. Gemini keeps its API-to-Web fallback inside one logical provider attempt. A provider named in the request or saved configuration is strict: an ineligible provider or failed attempt is reported without trying another provider.
 
 Optional dependencies for video frame extraction:
 
@@ -176,8 +176,11 @@ When Readability fails or returns only a cookie notice, the extension retries vi
 ## How It Works
 
 ```
-web_search(query)
-  → Exa (direct API with key, MCP without) → Perplexity → Gemini API → Gemini Web (if browser cookies enabled)
+web_search(query, provider: auto)
+  → OpenAI (when policy permits) → Exa → Brave → Parallel → Tavily → Perplexity → Gemini
+
+web_search(query, provider: named)
+  → exactly that provider, or its eligibility/attempt error
 
 fetch_content(url)
   → Video file?  Gemini API (Files API) → Gemini Web (if browser cookies enabled)
@@ -336,7 +339,9 @@ Rate limits: Perplexity is capped at 10 requests/minute (client-side). Content f
 | `tavily.ts` | Tavily Search API provider |
 | `exa.ts` | Exa.ai search provider — direct API and MCP proxy |
 | `extract.ts` | URL/file path routing, HTTP extraction, fallback orchestration |
-| `gemini-search.ts` | Search routing across OpenAI, Brave, Parallel, Tavily, Exa, Perplexity, Gemini API, Gemini Web |
+| `search-provider.ts` | Shared provider request, result, eligibility, and adapter contracts |
+| `web-search.ts` | Strict/automatic provider selection, fixed ordering, fallback, attribution, and aggregate failures |
+| `gemini-search.ts` | Gemini API and Gemini Web search implementation |
 | `gemini-url-context.ts` | Gemini URL Context + Web extraction fallbacks |
 | `gemini-web.ts` | Gemini Web client (cookie auth, StreamGenerate) |
 | `gemini-web-config.ts` | Gemini Web profile and browser-cookie opt-in config |

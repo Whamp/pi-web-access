@@ -1,7 +1,9 @@
 import { existsSync, readFileSync } from "node:fs";
 import { activityMonitor } from "./activity.ts";
-import type { ExtractedContent } from "./extract.ts";
+import type { SearchOptions, SearchProviderAdapter, SearchResponse, SearchResult } from "./search-provider.ts";
 import { getWebSearchConfigPath } from "./utils.ts";
+
+export type { SearchOptions, SearchResponse, SearchResult } from "./search-provider.ts";
 
 const PERPLEXITY_API_URL = "https://api.perplexity.ai/chat/completions";
 const CONFIG_PATH = getWebSearchConfigPath();
@@ -12,25 +14,6 @@ const RATE_LIMIT = {
 };
 
 const requestTimestamps: number[] = [];
-
-export interface SearchResult {
-	title: string;
-	url: string;
-	snippet: string;
-}
-
-export interface SearchResponse {
-	answer: string;
-	results: SearchResult[];
-	inlineContent?: ExtractedContent[];
-}
-
-export interface SearchOptions {
-	numResults?: number;
-	recencyFilter?: "day" | "week" | "month" | "year";
-	domainFilter?: string[];
-	signal?: AbortSignal;
-}
 
 interface WebSearchConfig {
 	perplexityApiKey?: unknown;
@@ -192,3 +175,12 @@ export async function searchWithPerplexity(query: string, options: SearchOptions
 	activityMonitor.logComplete(activityId, response.status);
 	return { answer, results };
 }
+
+export const perplexitySearchProvider: SearchProviderAdapter<"perplexity"> = {
+	name: "perplexity",
+	label: "Perplexity",
+	eligibility: () => isPerplexityAvailable()
+		? { eligible: true }
+		: { eligible: false, reason: "Perplexity API key is not configured." },
+	search: ({ query, options }) => searchWithPerplexity(query, options),
+};

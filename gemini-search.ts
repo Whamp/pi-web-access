@@ -1,56 +1,49 @@
 import { existsSync, readFileSync } from "node:fs";
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { activityMonitor } from "./activity.ts";
-import { getApiKey, getVersionedApiBase, buildKeyParam, buildAuthHeaders, isGatewayConfigured, DEFAULT_MODEL } from "./gemini-api.ts";
+import {
+	getApiKey,
+	getVersionedApiBase,
+	buildKeyParam,
+	buildAuthHeaders,
+	isGatewayConfigured,
+	isGeminiApiAvailable,
+	DEFAULT_MODEL,
+} from "./gemini-api.ts";
 import { isGeminiWebAvailable, queryWithCookies } from "./gemini-web.ts";
-import { isPerplexityAvailable, searchWithPerplexity, type SearchResult, type SearchResponse, type SearchOptions } from "./perplexity.ts";
-import { hasExaApiKey, isExaAvailable, searchWithExa } from "./exa.ts";
-import { isBraveAvailable, searchWithBrave } from "./brave.ts";
-import { isOpenAISearchAvailable, searchWithOpenAI } from "./openai-search.ts";
-import { isParallelAvailable, searchWithParallel } from "./parallel.ts";
-import { isTavilyAvailable, searchWithTavily } from "./tavily.ts";
+import type {
+	AttributedSearchResponse,
+	FullSearchOptions,
+	SearchOptions,
+	SearchProvider,
+	SearchProviderAdapter,
+	SearchResponse,
+	SearchResult,
+} from "./search-provider.ts";
 import { getWebSearchConfigPath } from "./utils.ts";
 
-export type SearchProvider = "auto" | "openai" | "brave" | "parallel" | "tavily" | "perplexity" | "gemini" | "exa";
-export type ResolvedSearchProvider = Exclude<SearchProvider, "auto">;
-
-export interface AttributedSearchResponse extends SearchResponse {
-	provider: ResolvedSearchProvider;
-}
+export type {
+	AttributedSearchResponse,
+	FullSearchOptions,
+	ResolvedSearchProvider,
+	SearchProvider,
+} from "./search-provider.ts";
 
 const CONFIG_PATH = getWebSearchConfigPath();
-
 let cachedSearchConfig: { searchProvider: SearchProvider; searchModel?: string } | null = null;
 
-function getSearchConfig(): { searchProvider: SearchProvider; searchModel?: string } {
-	if (cachedSearchConfig) return cachedSearchConfig;
-	if (!existsSync(CONFIG_PATH)) {
-		cachedSearchConfig = { searchProvider: "auto", searchModel: undefined };
-		return cachedSearchConfig;
+function normalizeSearchProvider(value: unknown): SearchProvider {
+	if (typeof value !== "string") return "auto";
+	switch (value.trim().toLowerCase()) {
+		case "auto": return "auto";
+		case "openai": return "openai";
+		case "exa": return "exa";
+		case "brave": return "brave";
+		case "parallel": return "parallel";
+		case "tavily": return "tavily";
+		case "perplexity": return "perplexity";
+		case "gemini": return "gemini";
+		default: return "auto";
 	}
-
-	const rawText = readFileSync(CONFIG_PATH, "utf-8");
-	let raw: {
-		searchProvider?: SearchProvider;
-		provider?: SearchProvider;
-		searchModel?: unknown;
-	};
-	try {
-		raw = JSON.parse(rawText) as {
-			searchProvider?: SearchProvider;
-			provider?: SearchProvider;
-			searchModel?: unknown;
-		};
-	} catch (err) {
-		const message = err instanceof Error ? err.message : String(err);
-		throw new Error(`Failed to parse ${CONFIG_PATH}: ${message}`);
-	}
-
-	cachedSearchConfig = {
-		searchProvider: normalizeSearchProvider(raw.searchProvider ?? raw.provider),
-		searchModel: normalizeSearchModel(raw.searchModel),
-	};
-	return cachedSearchConfig;
 }
 
 function normalizeSearchModel(value: unknown): string | undefined {
@@ -59,204 +52,96 @@ function normalizeSearchModel(value: unknown): string | undefined {
 	return normalized.length > 0 ? normalized : undefined;
 }
 
-function normalizeSearchProvider(value: unknown): SearchProvider {
-	const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
-	const valid: SearchProvider[] = ["auto", "openai", "brave", "parallel", "tavily", "perplexity", "gemini", "exa"];
-	return valid.includes(normalized as SearchProvider) ? normalized as SearchProvider : "auto";
-}
-
-export interface FullSearchOptions extends SearchOptions {
-	provider?: SearchProvider;
-	includeContent?: boolean;
-	extensionContext?: ExtensionContext;
-}
-
-function errorMessage(err: unknown): string {
-	return err instanceof Error ? err.message : String(err);
-}
-
-function isAbortError(err: unknown): boolean {
-	return errorMessage(err).toLowerCase().includes("abort");
-}
-
-function shouldTryOpenAIInAuto(options: SearchOptions): boolean {
-	if (options.recencyFilter) return false;
-	if (typeof options.numResults === "number" && Number.isFinite(options.numResults) && Math.floor(options.numResults) !== 5) {
-		return false;
+function getSearchConfig(): { searchProvider: SearchProvider; searchModel?: string } {
+	if (cachedSearchConfig) return cachedSearchConfig;
+	if (!existsSync(CONFIG_PATH)) {
+		cachedSearchConfig = { searchProvider: "auto" };
+		return cachedSearchConfig;
 	}
-	return true;
+
+	const rawText = readFileSync(CONFIG_PATH, "utf-8");
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(rawText);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		throw new Error(`Failed to parse ${CONFIG_PATH}: ${message}`);
+	}
+	const searchProvider = parsed !== null && typeof parsed === "object"
+		? Reflect.get(parsed, "searchProvider") ?? Reflect.get(parsed, "provider")
+		: undefined;
+	const searchModel = parsed !== null && typeof parsed === "object"
+		? Reflect.get(parsed, "searchModel")
+		: undefined;
+	cachedSearchConfig = {
+		searchProvider: normalizeSearchProvider(searchProvider),
+		searchModel: normalizeSearchModel(searchModel),
+	};
+	return cachedSearchConfig;
 }
 
-async function searchWithGemini(
-	query: string,
-	options: SearchOptions,
-	strictErrors: boolean,
-): Promise<SearchResponse | null> {
+function getSearchModel(): string {
+	return getSearchConfig().searchModel ?? DEFAULT_MODEL;
+}
+
+function errorMessage(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
+function throwIfCallerCancelled(signal: AbortSignal | undefined): void {
+	if (signal?.aborted) signal.throwIfAborted();
+}
+
+async function searchWithGemini(query: string, options: SearchOptions): Promise<SearchResponse> {
 	const errors: string[] = [];
 
 	try {
 		const apiResult = await searchWithGeminiApi(query, options);
+		throwIfCallerCancelled(options.signal);
 		if (apiResult) return apiResult;
-	} catch (err) {
-		if (isAbortError(err)) throw err;
-		errors.push(`Gemini API: ${errorMessage(err)}`);
+	} catch (error) {
+		throwIfCallerCancelled(options.signal);
+		errors.push(`Gemini API: ${errorMessage(error)}`);
 	}
 
 	try {
 		const webResult = await searchWithGeminiWeb(query, options);
+		throwIfCallerCancelled(options.signal);
 		if (webResult) return webResult;
-	} catch (err) {
-		if (isAbortError(err)) throw err;
-		errors.push(`Gemini Web: ${errorMessage(err)}`);
+	} catch (error) {
+		throwIfCallerCancelled(options.signal);
+		errors.push(`Gemini Web: ${errorMessage(error)}`);
 	}
 
-	if (strictErrors && errors.length > 0) {
+	if (errors.length > 0) {
 		throw new Error(`Gemini search failed:\n  - ${errors.join("\n  - ")}`);
 	}
 
-	return null;
+	throw new Error(
+		"Gemini search unavailable. Either:\n" +
+		`  1. Set GEMINI_API_KEY in ${CONFIG_PATH}\n` +
+		"  2. Set GOOGLE_GEMINI_BASE_URL + CLOUDFLARE_API_KEY for Cloudflare AI Gateway routing\n" +
+		"  3. Sign into gemini.google.com in a supported Chromium-based browser",
+	);
 }
 
+export const geminiSearchProvider: SearchProviderAdapter<"gemini"> = {
+	name: "gemini",
+	label: "Gemini",
+	eligibility: async () => isGeminiApiAvailable() || !!(await isGeminiWebAvailable())
+		? { eligible: true }
+		: { eligible: false, reason: "Gemini API, gateway, and browser credentials are not available." },
+	search: ({ query, options }) => searchWithGemini(query, options),
+};
+
+/** @deprecated Import the ready `webSearch` object from web-search.ts. */
 export async function search(query: string, options: FullSearchOptions = {}): Promise<AttributedSearchResponse> {
 	const config = getSearchConfig();
-	const provider = options.provider ?? config.searchProvider;
-
-	if (provider === "openai") {
-		const result = await searchWithOpenAI(query, options, options.extensionContext);
-		return { ...result, provider: "openai" };
-	}
-
-	if (provider === "brave") {
-		const result = await searchWithBrave(query, options);
-		return { ...result, provider: "brave" };
-	}
-
-	if (provider === "parallel") {
-		const result = await searchWithParallel(query, options);
-		return { ...result, provider: "parallel" };
-	}
-
-	if (provider === "tavily") {
-		const result = await searchWithTavily(query, options);
-		return { ...result, provider: "tavily" };
-	}
-
-	if (provider === "perplexity") {
-		const result = await searchWithPerplexity(query, options);
-		return { ...result, provider: "perplexity" };
-	}
-
-	if (provider === "gemini") {
-		const result = await searchWithGemini(query, options, true);
-		if (result) return { ...result, provider: "gemini" };
-		throw new Error(
-			"Gemini search unavailable. Either:\n" +
-			`  1. Set GEMINI_API_KEY in ${CONFIG_PATH}\n` +
-			"  2. Set GOOGLE_GEMINI_BASE_URL + CLOUDFLARE_API_KEY for Cloudflare AI Gateway routing\n" +
-			"  3. Sign into gemini.google.com in a supported Chromium-based browser"
-		);
-	}
-
-	if (provider === "exa") {
-		const exaApiKeyConfigured = hasExaApiKey();
-		try {
-			const result = await searchWithExa(query, options);
-			if (result) return { ...result, provider: "exa" };
-			if (exaApiKeyConfigured) {
-				throw new Error("Exa search returned no results.");
-			}
-		} catch (err) {
-			const message = err instanceof Error ? err.message : String(err);
-			if (message.toLowerCase().includes("abort")) throw err;
-			if (exaApiKeyConfigured) throw err;
-			// No API key: allow provider fallback.
-		}
-	}
-
-	const fallbackErrors: string[] = [];
-
-	if (shouldTryOpenAIInAuto(options)) {
-		try {
-			if (await isOpenAISearchAvailable(options.extensionContext)) {
-				const result = await searchWithOpenAI(query, options, options.extensionContext);
-				return { ...result, provider: "openai" };
-			}
-		} catch (err) {
-			if (isAbortError(err)) throw err;
-			fallbackErrors.push(`OpenAI: ${errorMessage(err)}`);
-		}
-	}
-
-	if (provider !== "exa" && isExaAvailable()) {
-		try {
-			const result = await searchWithExa(query, options);
-			if (result) return { ...result, provider: "exa" };
-		} catch (err) {
-			if (isAbortError(err)) throw err;
-			fallbackErrors.push(`Exa: ${errorMessage(err)}`);
-		}
-	}
-
-	if (isBraveAvailable()) {
-		try {
-			const result = await searchWithBrave(query, options);
-			return { ...result, provider: "brave" };
-		} catch (err) {
-			if (isAbortError(err)) throw err;
-			fallbackErrors.push(`Brave: ${errorMessage(err)}`);
-		}
-	}
-
-	if (isParallelAvailable()) {
-		try {
-			const result = await searchWithParallel(query, options);
-			return { ...result, provider: "parallel" };
-		} catch (err) {
-			if (isAbortError(err)) throw err;
-			fallbackErrors.push(`Parallel: ${errorMessage(err)}`);
-		}
-	}
-
-	if (isTavilyAvailable()) {
-		try {
-			const result = await searchWithTavily(query, options);
-			return { ...result, provider: "tavily" };
-		} catch (err) {
-			if (isAbortError(err)) throw err;
-			fallbackErrors.push(`Tavily: ${errorMessage(err)}`);
-		}
-	}
-
-	if (isPerplexityAvailable()) {
-		try {
-			const result = await searchWithPerplexity(query, options);
-			return { ...result, provider: "perplexity" };
-		} catch (err) {
-			if (isAbortError(err)) throw err;
-			fallbackErrors.push(`Perplexity: ${errorMessage(err)}`);
-		}
-	}
-
-	try {
-		const geminiResult = await searchWithGemini(query, options, false);
-		if (geminiResult) return { ...geminiResult, provider: "gemini" };
-	} catch (err) {
-		if (isAbortError(err)) throw err;
-		fallbackErrors.push(`Gemini: ${errorMessage(err)}`);
-	}
-
-	if (fallbackErrors.length > 0) {
-		throw new Error(`Auto provider search failed:\n  - ${fallbackErrors.join("\n  - ")}`);
-	}
-
-	throw new Error(
-		"No search provider available. Either:\n" +
-		"  1. Use /login to sign in with a Codex subscription for OpenAI web search\n" +
-		`  2. Set openaiApiKey, braveApiKey, parallelApiKey, tavilyApiKey, perplexityApiKey, exaApiKey, geminiApiKey, or cloudflareApiKey in ${CONFIG_PATH}\n` +
-		"  3. Set OPENAI_API_KEY, BRAVE_API_KEY, PARALLEL_API_KEY, TAVILY_API_KEY, EXA_API_KEY, PERPLEXITY_API_KEY, GEMINI_API_KEY, or CLOUDFLARE_API_KEY env vars\n" +
-		"  4. Set GOOGLE_GEMINI_BASE_URL with CLOUDFLARE_API_KEY for Cloudflare AI Gateway routing\n" +
-		"  5. Sign into gemini.google.com in a supported Chromium-based browser"
-	);
+	const { webSearch } = await import("./web-search.ts");
+	return webSearch.search(query, {
+		...options,
+		provider: options.provider ?? config.searchProvider,
+	});
 }
 
 async function searchWithGeminiApi(query: string, options: SearchOptions = {}): Promise<SearchResponse | null> {
@@ -266,7 +151,7 @@ async function searchWithGeminiApi(query: string, options: SearchOptions = {}): 
 	const activityId = activityMonitor.logStart({ type: "api", query });
 
 	try {
-		const model = getSearchConfig().searchModel ?? DEFAULT_MODEL;
+		const model = getSearchModel();
 		const body = {
 			contents: [{ role: "user", parts: [{ text: query }] }],
 			tools: [{ google_search: {} }],

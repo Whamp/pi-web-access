@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { activityMonitor } from "./activity.ts";
 import type { ExtractedContent } from "./extract.ts";
-import type { SearchOptions, SearchResponse } from "./perplexity.ts";
+import type { SearchOptions, SearchProviderAdapter, SearchResponse } from "./search-provider.ts";
 import { getWebSearchConfigPath } from "./utils.ts";
 
 const EXA_ANSWER_URL = "https://api.exa.ai/answer";
@@ -452,3 +452,14 @@ export async function searchWithExa(query: string, options: ExaSearchOptions = {
 		throw err;
 	}
 }
+
+export const exaSearchProvider: SearchProviderAdapter<"exa"> = {
+	name: "exa",
+	label: "Exa",
+	eligibility: () => ({ eligible: true }),
+	search: async ({ query, options }) => {
+		const result = await searchWithExa(query, options);
+		if (!result) throw new Error("Exa search returned no results.");
+		return result;
+	},
+};

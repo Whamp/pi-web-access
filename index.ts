@@ -5,8 +5,8 @@ import { StringEnum, complete, type Model } from "@earendil-works/pi-ai/compat";
 import { fetchAllContent, type ExtractedContent } from "./extract.ts";
 import { normalizeFetchContentParams } from "./fetch-params.ts";
 import { clearCloneCache } from "./github-extract.ts";
-import { search, type SearchProvider, type ResolvedSearchProvider } from "./gemini-search.ts";
-import type { SearchResult } from "./perplexity.ts";
+import type { ResolvedSearchProvider, SearchProvider, SearchResult } from "./search-provider.ts";
+import { webSearch } from "./web-search.ts";
 import { formatSeconds, getWebSearchConfigDir, getWebSearchConfigPath } from "./utils.ts";
 import {
 	clearResults,
@@ -33,15 +33,8 @@ import { createRequire } from "node:module";
 import { platform } from "node:os";
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { isPerplexityAvailable } from "./perplexity.ts";
-import { isExaAvailable } from "./exa.ts";
-import { isGeminiApiAvailable } from "./gemini-api.ts";
 import { getActiveGoogleEmail, isGeminiWebAvailable } from "./gemini-web.ts";
 import { isBrowserCookieAccessAllowed } from "./gemini-web-config.ts";
-import { isBraveAvailable } from "./brave.ts";
-import { isOpenAISearchAvailable } from "./openai-search.ts";
-import { isParallelAvailable } from "./parallel.ts";
-import { isTavilyAvailable } from "./tavily.ts";
 import { buildSearchErrorPlan, type SearchErrorDetails, type SearchErrorPlan } from "./render-search-error.ts";
 import { loadEnabledModelPatterns, modelMatchesEnabledPatterns } from "./summary-model-scope.ts";
 
@@ -185,15 +178,15 @@ function getCuratorTimeoutSeconds(): number {
 }
 
 async function getProviderAvailability(ctx: ExtensionContext): Promise<ProviderAvailability> {
-	const geminiWebAvail = await isGeminiWebAvailable();
+	const eligibility = await webSearch.eligibility({ extensionContext: ctx });
 	return {
-		openai: await isOpenAISearchAvailable(ctx),
-		brave: isBraveAvailable(),
-		parallel: isParallelAvailable(),
-		tavily: isTavilyAvailable(),
-		perplexity: isPerplexityAvailable(),
-		exa: isExaAvailable(),
-		gemini: isGeminiApiAvailable() || !!geminiWebAvail,
+		openai: eligibility.openai.eligible,
+		brave: eligibility.brave.eligible,
+		parallel: eligibility.parallel.eligible,
+		tavily: eligibility.tavily.eligible,
+		perplexity: eligibility.perplexity.eligible,
+		exa: eligibility.exa.eligible,
+		gemini: eligibility.gemini.eligible,
 	};
 }
 
@@ -240,27 +233,6 @@ function resolveProvider(
 
 	if (provider === "auto") {
 		return firstAvailableProvider(available, preferOpenAI, "exa");
-	}
-	if (provider === "openai" && !available.openai) {
-		return firstAvailableProvider(available, false, "openai");
-	}
-	if (provider === "brave" && !available.brave) {
-		return firstAvailableProvider(available, preferOpenAI, "brave");
-	}
-	if (provider === "parallel" && !available.parallel) {
-		return firstAvailableProvider(available, preferOpenAI, "parallel");
-	}
-	if (provider === "tavily" && !available.tavily) {
-		return firstAvailableProvider(available, preferOpenAI, "tavily");
-	}
-	if (provider === "exa" && !available.exa) {
-		return firstAvailableProvider(available, preferOpenAI, "exa");
-	}
-	if (provider === "perplexity" && !available.perplexity) {
-		return firstAvailableProvider(available, preferOpenAI, "perplexity");
-	}
-	if (provider === "gemini" && !available.gemini) {
-		return firstAvailableProvider(available, preferOpenAI, "gemini");
 	}
 	return provider;
 }
@@ -1105,7 +1077,7 @@ export default function (pi: ExtensionAPI) {
 							? pc.searchProvider
 							: normalizedProvider;
 						try {
-							const { answer, results, inlineContent, provider: actualProvider } = await search(query, {
+							const { answer, results, inlineContent, provider: actualProvider } = await webSearch.search(query, {
 								provider: requestedProvider,
 								numResults: pc.numResults,
 								recencyFilter: pc.recencyFilter,
@@ -1332,7 +1304,7 @@ export default function (pi: ExtensionAPI) {
 				const availableProviders = bootstrap.availableProviders;
 				const defaultProvider = bootstrap.defaultProvider;
 				const rawSearchProvider = normalizeProviderInput(params.provider ?? loadConfig().provider ?? "auto") ?? "auto";
-				const searchProvider = rawSearchProvider === "auto" ? "auto" : defaultProvider;
+				const searchProvider = rawSearchProvider;
 				const curatorTimeoutSeconds = bootstrap.timeoutSeconds;
 				const curatorWorkflow: CuratorWorkflow = "summary-review";
 
@@ -1408,7 +1380,7 @@ export default function (pi: ExtensionAPI) {
 					});
 					const requestedProvider = pc.searchProvider;
 					try {
-						const { answer, results, inlineContent, provider } = await search(queryList[qi], {
+						const { answer, results, inlineContent, provider } = await webSearch.search(queryList[qi], {
 							provider: requestedProvider,
 							numResults: params.numResults,
 							recencyFilter: params.recencyFilter,
@@ -1491,7 +1463,7 @@ export default function (pi: ExtensionAPI) {
 				});
 
 				try {
-					const { answer, results, inlineContent, provider } = await search(query, {
+					const { answer, results, inlineContent, provider } = await webSearch.search(query, {
 						provider: resolvedProvider,
 						numResults: params.numResults,
 						recencyFilter: params.recencyFilter,
@@ -2248,7 +2220,7 @@ export default function (pi: ExtensionAPI) {
 			const curatorTimeoutSeconds = bootstrap.timeoutSeconds;
 			let currentProvider = initialProvider;
 			const rawSearchProvider = normalizeProviderInput(loadConfig().provider ?? "auto") ?? "auto";
-			let currentSearchProvider = rawSearchProvider === "auto" ? "auto" : initialProvider;
+			let currentSearchProvider = rawSearchProvider;
 			const summaryContext: SummaryGenerationContext = {
 				model: ctx.model,
 				modelRegistry: ctx.modelRegistry,
@@ -2367,7 +2339,7 @@ export default function (pi: ExtensionAPI) {
 								? currentSearchProvider
 								: normalizedProvider;
 							try {
-								const { answer, results, provider: actualProvider } = await search(query, {
+								const { answer, results, provider: actualProvider } = await webSearch.search(query, {
 									provider: requestedProvider,
 									signal: searchAbort.signal,
 									extensionContext: ctx,
@@ -2440,7 +2412,7 @@ export default function (pi: ExtensionAPI) {
 							if (aborted || !isCommandActive()) break;
 							const requestedProvider = currentSearchProvider;
 							try {
-								const { answer, results, provider } = await search(queries[qi], {
+								const { answer, results, provider } = await webSearch.search(queries[qi], {
 									provider: requestedProvider,
 									signal: searchAbort.signal,
 									extensionContext: ctx,

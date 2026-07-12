@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { activityMonitor } from "./activity.ts";
-import type { SearchOptions, SearchResponse, SearchResult } from "./perplexity.ts";
+import type { SearchOptions, SearchProviderAdapter, SearchResponse, SearchResult } from "./search-provider.ts";
 import { getWebSearchConfigPath } from "./utils.ts";
 
 const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
@@ -397,3 +397,12 @@ export async function searchWithOpenAI(
 		throw err;
 	}
 }
+
+export const openAISearchProvider: SearchProviderAdapter<"openai"> = {
+	name: "openai",
+	label: "OpenAI",
+	eligibility: async ({ extensionContext }) => await isOpenAISearchAvailable(extensionContext)
+		? { eligible: true }
+		: { eligible: false, reason: "OpenAI web search credentials are not configured." },
+	search: ({ query, options }) => searchWithOpenAI(query, options, options.extensionContext),
+};

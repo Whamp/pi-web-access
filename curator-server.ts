@@ -242,15 +242,14 @@ export function startCuratorServer(
 		return true;
 	}
 
-	function isAvailableProvider(provider: string): boolean {
-		if (provider === "openai") return availableProviders.openai;
-		if (provider === "brave") return availableProviders.brave;
-		if (provider === "parallel") return availableProviders.parallel;
-		if (provider === "tavily") return availableProviders.tavily;
-		if (provider === "perplexity") return availableProviders.perplexity;
-		if (provider === "exa") return availableProviders.exa;
-		if (provider === "gemini") return availableProviders.gemini;
-		return false;
+	function isKnownProvider(provider: string): boolean {
+		return provider === "openai"
+			|| provider === "brave"
+			|| provider === "parallel"
+			|| provider === "tavily"
+			|| provider === "perplexity"
+			|| provider === "exa"
+			|| provider === "gemini";
 	}
 
 	function sendSSE(event: string, data: unknown): void {
@@ -370,8 +369,8 @@ export function startCuratorServer(
 					sendJson(res, 400, { ok: false, error: "Invalid provider" });
 					return;
 				}
-				if (!isAvailableProvider(provider)) {
-					sendJson(res, 400, { ok: false, error: `Provider unavailable: ${provider}` });
+				if (!isKnownProvider(provider)) {
+					sendJson(res, 400, { ok: false, error: `Unknown provider: ${provider}` });
 					return;
 				}
 				setImmediate(() => callbacks.onProviderChange(provider));
@@ -397,8 +396,8 @@ export function startCuratorServer(
 						sendJson(res, 400, { ok: false, error: "Invalid provider" });
 						return;
 					}
-					if (!isAvailableProvider(provider)) {
-						sendJson(res, 400, { ok: false, error: `Provider unavailable: ${provider}` });
+					if (!isKnownProvider(provider)) {
+						sendJson(res, 400, { ok: false, error: `Unknown provider: ${provider}` });
 						return;
 					}
 				}

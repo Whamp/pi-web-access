@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { activityMonitor } from "./activity.ts";
-import type { SearchOptions, SearchResult, SearchResponse } from "./perplexity.ts";
+import type { SearchOptions, SearchProviderAdapter, SearchResult, SearchResponse } from "./search-provider.ts";
 import { getWebSearchConfigPath } from "./utils.ts";
 
 const BRAVE_API_URL = "https://api.search.brave.com/res/v1/web/search";
@@ -208,3 +208,12 @@ export async function searchWithBrave(
 		throw err;
 	}
 }
+
+export const braveSearchProvider: SearchProviderAdapter<"brave"> = {
+	name: "brave",
+	label: "Brave",
+	eligibility: () => isBraveAvailable()
+		? { eligible: true }
+		: { eligible: false, reason: "Brave API key is not configured." },
+	search: ({ query, options }) => searchWithBrave(query, options),
+};

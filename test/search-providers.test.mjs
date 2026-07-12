@@ -8,8 +8,10 @@ import { test } from "node:test";
 const braveModuleUrl = new URL("../brave.ts", import.meta.url).href;
 const exaModuleUrl = new URL("../exa.ts", import.meta.url).href;
 const openaiModuleUrl = new URL("../openai-search.ts", import.meta.url).href;
+const parallelModuleUrl = new URL("../parallel.ts", import.meta.url).href;
+const perplexityModuleUrl = new URL("../perplexity.ts", import.meta.url).href;
 const tavilyModuleUrl = new URL("../tavily.ts", import.meta.url).href;
-const searchModuleUrl = new URL("../gemini-search.ts", import.meta.url).href;
+const geminiModuleUrl = new URL("../gemini-search.ts", import.meta.url).href;
 
 function runChild(script, env) {
 	const childEnv = { ...process.env };
@@ -52,11 +54,11 @@ test("Brave search applies domain filters in the query and returned results", as
 			}), { status: 200, headers: { "content-type": "application/json" } });
 		};
 
-		const { searchWithBrave } = await import(${JSON.stringify(braveModuleUrl)});
-		const result = await searchWithBrave("sdk docs", {
+		const { braveSearchProvider } = await import(${JSON.stringify(braveModuleUrl)});
+		const result = await braveSearchProvider.search({ query: "sdk docs", options: {
 			domainFilter: ["github.com", "-gist.github.com"],
 			numResults: 2,
-		});
+		} });
 		const parsedUrl = new URL(capturedUrl);
 		console.log(JSON.stringify({
 			q: parsedUrl.searchParams.get("q"),
@@ -100,13 +102,13 @@ test("Tavily search uses bearer auth and maps filters/content", async () => {
 			}), { status: 200, headers: { "content-type": "application/json" } });
 		};
 
-		const { searchWithTavily } = await import(${JSON.stringify(tavilyModuleUrl)});
-		const result = await searchWithTavily("tavily search docs", {
+		const { tavilySearchProvider } = await import(${JSON.stringify(tavilyModuleUrl)});
+		const result = await tavilySearchProvider.search({ query: "tavily search docs", options: {
 			domainFilter: ["https://docs.tavily.com/search", "-reddit.com"],
 			recencyFilter: "week",
 			numResults: 4,
 			includeContent: true,
-		});
+		} });
 		console.log(JSON.stringify({ capturedUrl, capturedHeaders, capturedBody, result }));
 	`, {
 		HOME: home,
@@ -133,42 +135,6 @@ test("Tavily search uses bearer auth and maps filters/content", async () => {
 	assert.deepEqual(output.result.inlineContent, [{ url: "https://docs.tavily.com/search", title: "Tavily Docs", content: "# Tavily Docs\nFull content", error: null }]);
 });
 
-test("auto provider falls through to Tavily after unavailable earlier providers", async () => {
-	const home = await mkdtemp(join(tmpdir(), "pi-web-access-tavily-auto-"));
-	const child = runChild(`
-		const calls = [];
-		globalThis.fetch = async (url, init = {}) => {
-			const urlText = String(url);
-			calls.push(urlText);
-			if (urlText === "https://mcp.exa.ai/mcp") {
-				return new Response("Exa unavailable", { status: 503 });
-			}
-			if (urlText === "https://api.tavily.com/search") {
-				return new Response(JSON.stringify({
-					answer: "Auto Tavily answer",
-					results: [{ title: "Tavily Auto", url: "https://docs.tavily.com/auto", content: "auto snippet" }],
-				}), { status: 200, headers: { "content-type": "application/json" } });
-			}
-			throw new Error("Unexpected fetch " + urlText);
-		};
-
-		const { search } = await import(${JSON.stringify(searchModuleUrl)});
-		const result = await search("auto tavily docs", { provider: "auto" });
-		console.log(JSON.stringify({ calls, result }));
-	`, {
-		HOME: home,
-		USERPROFILE: home,
-		TAVILY_API_KEY: "tvly-test-key",
-	});
-
-	assert.equal(child.status, 0, child.stderr);
-	const output = JSON.parse(child.stdout.trim());
-	assert.ok(output.calls.includes("https://mcp.exa.ai/mcp"));
-	assert.ok(output.calls.includes("https://api.tavily.com/search"));
-	assert.equal(output.result.provider, "tavily");
-	assert.equal(output.result.answer, "Auto Tavily answer");
-});
-
 test("Exa direct API key ignores full legacy usage counter", async () => {
 	const home = await mkdtemp(join(tmpdir(), "pi-web-access-exa-paid-"));
 	const child = runChild(`
@@ -188,9 +154,9 @@ test("Exa direct API key ignores full legacy usage counter", async () => {
 			}), { status: 200, headers: { "content-type": "application/json" } });
 		};
 
-		const { isExaAvailable, searchWithExa } = await import(${JSON.stringify(exaModuleUrl)});
-		const available = isExaAvailable();
-		const result = await searchWithExa("paid exa query");
+		const { exaSearchProvider } = await import(${JSON.stringify(exaModuleUrl)});
+		const available = (await exaSearchProvider.eligibility({})).eligible;
+		const result = await exaSearchProvider.search({ query: "paid exa query", options: {} });
 		const usage = JSON.parse(readFileSync(dir + "/exa-usage.json", "utf8"));
 		console.log(JSON.stringify({
 			available,
@@ -249,11 +215,11 @@ test("OpenAI search requires web_search and maps domain filters", async () => {
 			}), { status: 200, headers: { "content-type": "application/json" } });
 		};
 
-		const { searchWithOpenAI } = await import(${JSON.stringify(openaiModuleUrl)});
-		const result = await searchWithOpenAI("latest docs", {
+		const { openAISearchProvider } = await import(${JSON.stringify(openaiModuleUrl)});
+		const result = await openAISearchProvider.search({ query: "latest docs", options: {
 			domainFilter: ["https://openai.com/docs", "-reddit.com"],
 			numResults: 3,
-		});
+		} });
 		console.log(JSON.stringify({
 			url: capturedUrl,
 			authorization: capturedHeaders.Authorization,
@@ -282,4 +248,132 @@ test("OpenAI search requires web_search and maps domain filters", async () => {
 		"https://openai.com/docs",
 		"https://openai.com/blog",
 	]);
+});
+
+test("Parallel provider maps one mocked search request and response", async () => {
+	const home = await mkdtemp(join(tmpdir(), "pi-web-access-parallel-provider-"));
+	const child = runChild(`
+		let capturedBody = null;
+		globalThis.fetch = async (_url, init) => {
+			capturedBody = JSON.parse(init.body);
+			return new Response(JSON.stringify({
+				results: [{ title: "Parallel Docs", url: "https://docs.parallel.ai", excerpts: ["Parallel snippet"] }],
+			}), { status: 200, headers: { "content-type": "application/json" } });
+		};
+		const { parallelSearchProvider } = await import(${JSON.stringify(parallelModuleUrl)});
+		const result = await parallelSearchProvider.search({ query: "parallel docs", options: { numResults: 3 } });
+		console.log(JSON.stringify({ capturedBody, result }));
+	`, {
+		HOME: home,
+		USERPROFILE: home,
+		PARALLEL_API_KEY: "parallel-test-key",
+	});
+
+	assert.equal(child.status, 0, child.stderr);
+	const output = JSON.parse(child.stdout.trim());
+	assert.equal(output.capturedBody.objective, "parallel docs");
+	assert.equal(output.capturedBody.advanced_settings.max_results, 3);
+	assert.deepEqual(output.result.results, [{ title: "Parallel Docs", url: "https://docs.parallel.ai", snippet: "Parallel snippet" }]);
+});
+
+test("Perplexity provider maps one mocked search request and response", async () => {
+	const home = await mkdtemp(join(tmpdir(), "pi-web-access-perplexity-provider-"));
+	const child = runChild(`
+		let capturedHeaders = null;
+		let capturedBody = null;
+		globalThis.fetch = async (_url, init) => {
+			capturedHeaders = init.headers;
+			capturedBody = JSON.parse(init.body);
+			return new Response(JSON.stringify({
+				choices: [{ message: { content: "Perplexity answer" } }],
+				citations: [{ title: "Perplexity Docs", url: "https://docs.perplexity.ai" }],
+			}), { status: 200, headers: { "content-type": "application/json" } });
+		};
+		const { perplexitySearchProvider } = await import(${JSON.stringify(perplexityModuleUrl)});
+		const result = await perplexitySearchProvider.search({ query: "perplexity docs", options: { recencyFilter: "month" } });
+		console.log(JSON.stringify({ capturedHeaders, capturedBody, result }));
+	`, {
+		HOME: home,
+		USERPROFILE: home,
+		PERPLEXITY_API_KEY: "perplexity-test-key",
+	});
+
+	assert.equal(child.status, 0, child.stderr);
+	const output = JSON.parse(child.stdout.trim());
+	assert.equal(output.capturedHeaders.Authorization, "Bearer perplexity-test-key");
+	assert.equal(output.capturedBody.search_recency_filter, "month");
+	assert.equal(output.result.answer, "Perplexity answer");
+	assert.deepEqual(output.result.results, [{ title: "Perplexity Docs", url: "https://docs.perplexity.ai", snippet: "" }]);
+});
+
+test("Gemini provider keeps API to Web behavior inside one logical attempt", async () => {
+	const home = await mkdtemp(join(tmpdir(), "pi-web-access-gemini-provider-"));
+	const child = runChild(`
+		let calls = 0;
+		let capturedUrl = "";
+		globalThis.fetch = async (url) => {
+			calls += 1;
+			capturedUrl = String(url);
+			return new Response(JSON.stringify({
+				candidates: [{
+					content: { parts: [{ text: "Gemini answer" }] },
+					groundingMetadata: { groundingChunks: [{ web: { title: "Gemini Source", uri: "https://example.com/gemini" } }] },
+				}],
+			}), { status: 200, headers: { "content-type": "application/json" } });
+		};
+		const { geminiSearchProvider } = await import(${JSON.stringify(geminiModuleUrl)});
+		const result = await geminiSearchProvider.search({ query: "gemini docs", options: {} });
+		console.log(JSON.stringify({ calls, capturedUrl, result }));
+	`, {
+		HOME: home,
+		USERPROFILE: home,
+		GEMINI_API_KEY: "gemini-test-key",
+	});
+
+	assert.equal(child.status, 0, child.stderr);
+	const output = JSON.parse(child.stdout.trim());
+	assert.equal(output.calls, 1);
+	assert.match(output.capturedUrl, /generativelanguage\.googleapis\.com/);
+	assert.equal(output.result.answer, "Gemini answer");
+	assert.deepEqual(output.result.results, [{ title: "Gemini Source", url: "https://example.com/gemini", snippet: "" }]);
+});
+
+test("provider objects report eligibility and provider-specific ineligibility reasons", async () => {
+	const home = await mkdtemp(join(tmpdir(), "pi-web-access-provider-eligibility-"));
+	const child = runChild(`
+		const modules = await Promise.all([
+			import(${JSON.stringify(openaiModuleUrl)}),
+			import(${JSON.stringify(exaModuleUrl)}),
+			import(${JSON.stringify(braveModuleUrl)}),
+			import(${JSON.stringify(parallelModuleUrl)}),
+			import(${JSON.stringify(tavilyModuleUrl)}),
+			import(${JSON.stringify(perplexityModuleUrl)}),
+			import(${JSON.stringify(geminiModuleUrl)}),
+		]);
+		const providers = [
+			modules[0].openAISearchProvider,
+			modules[1].exaSearchProvider,
+			modules[2].braveSearchProvider,
+			modules[3].parallelSearchProvider,
+			modules[4].tavilySearchProvider,
+			modules[5].perplexitySearchProvider,
+			modules[6].geminiSearchProvider,
+		];
+		const eligibility = [];
+		for (const provider of providers) eligibility.push([provider.name, await provider.eligibility({})]);
+		console.log(JSON.stringify(eligibility));
+	`, {
+		HOME: home,
+		USERPROFILE: home,
+		PI_CODING_AGENT_DIR: home,
+	});
+
+	assert.equal(child.status, 0, child.stderr);
+	const eligibility = Object.fromEntries(JSON.parse(child.stdout.trim()));
+	assert.deepEqual(eligibility.exa, { eligible: true });
+	for (const name of ["openai", "brave", "parallel", "tavily", "perplexity", "gemini"]) {
+		assert.equal(eligibility[name].eligible, false);
+		assert.equal(typeof eligibility[name].reason, "string");
+		assert.ok(eligibility[name].reason.length > 0);
+	}
 });

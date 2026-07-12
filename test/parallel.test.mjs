@@ -18,8 +18,19 @@ async function createHome(config = {}) {
 
 function runChild(script, env = {}) {
 	const childEnv = { ...process.env };
-	delete childEnv.PI_CODING_AGENT_DIR;
-	delete childEnv.XDG_CONFIG_HOME;
+	for (const key of [
+		"PI_CODING_AGENT_DIR",
+		"XDG_CONFIG_HOME",
+		"OPENAI_API_KEY",
+		"BRAVE_API_KEY",
+		"PARALLEL_API_KEY",
+		"TAVILY_API_KEY",
+		"EXA_API_KEY",
+		"PERPLEXITY_API_KEY",
+		"GEMINI_API_KEY",
+	]) {
+		delete childEnv[key];
+	}
 	Object.assign(childEnv, env);
 	return spawnSync(process.execPath, ["--input-type=module"], {
 		input: script,
@@ -80,6 +91,48 @@ test("explicit Parallel search routes through Parallel API and maps results", as
 	assert.equal(output.result.provider, "parallel");
 	assert.deepEqual(output.result.results, [{ title: "Parallel Docs", url: "https://docs.parallel.ai/search", snippet: "Parallel search excerpt" }]);
 	assert.deepEqual(output.result.inlineContent, [{ url: "https://docs.parallel.ai/search", title: "Parallel Docs", content: "Parallel search excerpt", error: null }]);
+});
+
+test("compatibility search export honors current and legacy saved strict providers", async () => {
+	for (const configKey of ["provider", "searchProvider"]) {
+		const home = await createHome({ [configKey]: "brave" });
+		const child = runChild(`
+			let fetchCalls = 0;
+			globalThis.fetch = async () => {
+				fetchCalls += 1;
+				return new Response(JSON.stringify({
+					answer: "Exa fallback answer",
+					citations: [{ title: "Exa", url: "https://exa.ai" }],
+				}), { status: 200, headers: { "content-type": "application/json" } });
+			};
+			const { search } = await import(${JSON.stringify(searchModuleUrl)});
+			let outcome;
+			try {
+				const result = await search("strict saved provider");
+				outcome = { result };
+			} catch (error) {
+				outcome = {
+					errorName: error instanceof Error ? error.name : "unknown",
+					provider: Reflect.get(error, "provider"),
+					reason: Reflect.get(error, "reason"),
+				};
+			}
+			console.log(JSON.stringify({ fetchCalls, outcome }));
+		`, {
+			HOME: home,
+			USERPROFILE: home,
+			EXA_API_KEY: "exa-test-key",
+		});
+
+		assert.equal(child.status, 0, `${configKey}: ${child.stderr}`);
+		const output = JSON.parse(child.stdout.trim());
+		assert.equal(output.fetchCalls, 0, configKey);
+		assert.deepEqual(output.outcome, {
+			errorName: "ProviderIneligibleError",
+			provider: "brave",
+			reason: "Brave API key is not configured.",
+		}, configKey);
+	}
 });
 
 test("Parallel extract retries full content when excerpts are too short", async () => {

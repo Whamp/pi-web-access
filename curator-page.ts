@@ -23,13 +23,15 @@ function buildProviderButtons(
 	];
 
 	return providers
-		.filter(p => p.available)
+		.filter(p => p.available || p.value === selected)
 		.map((p) => {
 			const isDefault = p.value === selected;
 			const state = isDefault && hasInitialQueries ? "loading" : "idle";
-			const classes = ["provider-btn", state, isDefault ? "is-default" : ""].filter(Boolean).join(" ");
-			const disabled = state === "loading" ? " disabled" : "";
-			return `<button type="button" class="${classes}" data-provider="${p.value}" data-state="${state}"${disabled}>${p.label}</button>`;
+			const classes = ["provider-btn", state, isDefault ? "is-default" : "", p.available ? "" : "ineligible"].filter(Boolean).join(" ");
+			const disabled = state === "loading" || !p.available ? " disabled" : "";
+			const title = p.available ? "" : ` title="${p.label} is ineligible because its credentials or local access are unavailable"`;
+			const label = p.available ? p.label : `${p.label} (ineligible)`;
+			return `<button type="button" class="${classes}" data-provider="${p.value}" data-state="${state}"${title}${disabled}>${label}</button>`;
 		})
 		.join("");
 }
@@ -466,6 +468,9 @@ main {
 .provider-btn:disabled {
   cursor: default;
   opacity: 0.5;
+}
+.provider-btn.ineligible {
+  border-style: dashed;
 }
 
 @keyframes provider-pulse {
