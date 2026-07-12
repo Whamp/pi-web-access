@@ -533,6 +533,32 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
+	function publishStoredResult(data: StoredSearchData): boolean {
+		try {
+			pi.appendEntry("web-search-results", data);
+		} catch (error) {
+			if (isStaleExtensionContextError(error)) return false;
+			throw error;
+		}
+		storeResult(data.id, data);
+		return true;
+	}
+
+	function buildSessionChangedCancellation(): {
+		content: Array<{ type: "text"; text: string }>;
+		details: { error: string; cancelled: boolean; cancelReason: "session-changed" };
+	} {
+		const message = "Web search cancelled because the session changed.";
+		return {
+			content: [{ type: "text", text: message }],
+			details: {
+				error: message,
+				cancelled: true,
+				cancelReason: "session-changed",
+			},
+		};
+	}
+
 	async function fetchAndPublishInBackground(
 		fetchId: string,
 		urls: string[],
@@ -547,8 +573,11 @@ export default function (pi: ExtensionAPI) {
 				timestamp: Date.now(),
 				urls: stripThumbnails(fetched),
 			};
-			pi.appendEntry("web-search-results", data);
-			storeResult(fetchId, data);
+			if (!publishStoredResult(data)) {
+				sessionActive = false;
+				abortPendingFetches();
+				return;
+			}
 			const ok = fetched.filter(f => !f.error).length;
 			pi.sendMessage(
 				{
@@ -596,14 +625,12 @@ export default function (pi: ExtensionAPI) {
 		return fetchId;
 	}
 
-	function storeAndPublishSearch(results: QueryResultData[]): string {
+	function storeAndPublishSearch(results: QueryResultData[]): string | null {
 		const id = generateId();
 		const data: StoredSearchData = {
 			id, type: "search", timestamp: Date.now(), queries: results,
 		};
-		storeResult(id, data);
-		pi.appendEntry("web-search-results", data);
-		return id;
+		return publishStoredResult(data) ? id : null;
 	}
 
 	interface SearchReturnOptions {
@@ -874,8 +901,7 @@ export default function (pi: ExtensionAPI) {
 				timestamp: Date.now(),
 				urls: opts.inlineContent,
 			};
-			storeResult(fetchId, data);
-			pi.appendEntry("web-search-results", data);
+			if (!publishStoredResult(data)) return buildSessionChangedCancellation();
 			if (!hasApprovedSummary) {
 				output += `---\nFull content for ${opts.inlineContent.length} sources available [${fetchId}].`;
 			}
@@ -887,6 +913,7 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		const searchId = storeAndPublishSearch(opts.results);
+		if (searchId === null) return buildSessionChangedCancellation();
 		const isBackgroundFetch = fetchId !== null && !hasInlineReady;
 
 		return {
@@ -1834,8 +1861,7 @@ export default function (pi: ExtensionAPI) {
 				timestamp: Date.now(),
 				urls: stripThumbnails(fetchResults),
 			};
-			storeResult(responseId, data);
-			pi.appendEntry("web-search-results", data);
+			if (!publishStoredResult(data)) return buildSessionChangedCancellation();
 
 			// Single URL: return content directly (possibly truncated) with responseId
 			if (urlList.length === 1) {
