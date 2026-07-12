@@ -591,8 +591,11 @@ async function extractViaHttp(
 
 		if (isPDFContent) {
 			try {
-				const buffer = await response.arrayBuffer();
-				const result = await extractPDFToMarkdown(buffer, url);
+				const buffer = await settleWithAbort(() => response.arrayBuffer(), controller.signal);
+				const result = await settleWithAbort(
+					() => extractPDFToMarkdown(buffer, url, { signal: controller.signal }),
+					controller.signal,
+				);
 				activityMonitor.logComplete(activityId, response.status);
 				return {
 					url,
@@ -601,6 +604,7 @@ async function extractViaHttp(
 					error: null,
 				};
 			} catch (err) {
+				if (controller.signal.aborted) throw err;
 				const message = err instanceof Error ? err.message : String(err);
 				activityMonitor.logError(activityId, message);
 				return { url, title: "", content: "", error: `PDF extraction failed: ${message}` };
@@ -621,7 +625,7 @@ async function extractViaHttp(
 			};
 		}
 
-		const text = await response.text();
+		const text = await settleWithAbort(() => response.text(), controller.signal);
 		const isHTML = contentType.includes("text/html") || contentType.includes("application/xhtml+xml");
 
 		if (!isHTML) {

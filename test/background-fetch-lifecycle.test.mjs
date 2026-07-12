@@ -38,6 +38,7 @@ async function assertNoLateEffects(runtime, updates, releaseLateStep, requestCou
 	const entryCount = runtime.entries.length;
 	const messageCount = runtime.sent.length;
 	const updateCount = updates.length;
+	const widgetUpdateCount = runtime.widgetUpdates.length;
 	const unhandled = [];
 	const onUnhandled = (error) => unhandled.push(error);
 	process.on("unhandledRejection", onUnhandled);
@@ -52,6 +53,7 @@ async function assertNoLateEffects(runtime, updates, releaseLateStep, requestCou
 	assert.equal(runtime.sent.length, messageCount, "late retrieval must not send a message or trigger a turn");
 	assert.equal(updates.length, updateCount, "late retrieval must not report progress");
 	assert.equal(requestCount(), 0, "late retrieval must not start another request");
+	assert.equal(runtime.widgetUpdates.length, widgetUpdateCount, "late retrieval must not update activity UI");
 	assert.deepEqual(unhandled, [], "late retrieval must not reject without a handler");
 }
 
@@ -67,6 +69,7 @@ async function createRuntime(label) {
 	const runtime = createExtensionRuntime();
 	const sent = [];
 	const entries = [];
+	const widgetUpdates = [];
 	runtime.sendMessage = (message, options) => sent.push({ message, options });
 	runtime.appendEntry = (customType, data) => entries.push({ customType, data });
 	runtime.refreshTools = () => {};
@@ -90,12 +93,16 @@ async function createRuntime(label) {
 		mode: "print",
 		cwd: configDir,
 		sessionManager: { getBranch: () => [] },
-		ui: { setWidget() {}, notify() {} },
+		ui: {
+			theme: { fg: (_color, text) => text },
+			setWidget: (...args) => widgetUpdates.push(args),
+			notify() {},
+		},
 	};
 	for (const handler of extension.handlers.get("session_start") ?? []) {
 		await handler({ reason: "startup" }, context);
 	}
-	return { extension, runtime, sent, entries, context };
+	return { extension, runtime, sent, entries, widgetUpdates, context };
 }
 
 function tool(extension, name) {
@@ -274,6 +281,48 @@ test("caller cancellation terminally abandons a non-settling content step", asyn
 	assert.deepEqual(runtime.entries, []);
 	assert.deepEqual(runtime.sent, []);
 	await assertNoLateEffects(runtime, updates, () => slowFetch.resolve(jinaResponse("http://127.0.0.1/slow", "Slow")), () => requestsAfterCancellation);
+});
+
+test("caller cancellation terminally abandons a non-settling direct HTTP body", async () => {
+	const runtime = await createRuntime("caller-cancel-body");
+	const controller = new AbortController();
+	const callerReason = new Error("caller cancelled body");
+	const bodyGate = deferred();
+	const updates = [];
+	let requestsAfterCancellation = 0;
+	let cancelled = false;
+	globalThis.fetch = async (url) => {
+		const requestUrl = String(url);
+		if (cancelled) requestsAfterCancellation += 1;
+		if (requestUrl.startsWith("https://api.search.brave.com/res/v1/web/search")) return braveSearchResponse(["http://127.0.0.1/direct"]);
+		if (requestUrl === "https://r.jina.ai/http://127.0.0.1/direct") return new Response("too short", { status: 200 });
+		if (requestUrl === "http://127.0.0.1/direct") {
+			return {
+				ok: true,
+				status: 200,
+				statusText: "OK",
+				headers: new Headers({ "content-type": "text/plain" }),
+				text: () => bodyGate.promise,
+			};
+		}
+		throw new Error(`Unexpected fetch: ${requestUrl}`);
+	};
+
+	const activityShortcut = runtime.extension.shortcuts.get("ctrl+shift+w");
+	assert.ok(activityShortcut, "activity shortcut should be registered");
+	await activityShortcut.handler(runtime.context);
+	const execution = tool(runtime.extension, "web_search").execute(
+		"cancel-body-search",
+		{ query: "cancel direct body", provider: "brave", workflow: "none", includeContent: true },
+		controller.signal,
+		(update) => updates.push(update),
+		runtime.context,
+	);
+	await new Promise((resolve) => setTimeout(resolve, 20));
+	cancelled = true;
+	controller.abort(callerReason);
+	await assert.rejects(settlesWithin(execution, "direct body caller cancellation"), (error) => error === callerReason);
+	await assertNoLateEffects(runtime, updates, () => bodyGate.resolve("late body"), () => requestsAfterCancellation);
 });
 
 test("session replacement terminally abandons a non-settling content step", async () => {

@@ -10,6 +10,8 @@ import { writeFile, mkdir } from "node:fs/promises";
 import { join, basename } from "node:path";
 import { homedir } from "node:os";
 
+import { abortReason, settleWithAbort } from "./abort.ts";
+
 export interface PDFExtractResult {
   title: string;
   pages: number;
@@ -21,6 +23,7 @@ export interface PDFExtractOptions {
   maxPages?: number;
   outputDir?: string;
   filename?: string;
+  signal?: AbortSignal;
 }
 
 const DEFAULT_MAX_PAGES = 100;
@@ -38,14 +41,15 @@ export async function extractPDFToMarkdown(
     maxPages = DEFAULT_MAX_PAGES,
     outputDir = DEFAULT_OUTPUT_DIR,
     filename,
+    signal,
   } = options;
 
   const safeMaxPages = Number.isFinite(maxPages)
     ? Math.max(1, Math.floor(maxPages))
     : DEFAULT_MAX_PAGES;
 
-  const pdf = await getDocumentProxy(new Uint8Array(buffer));
-  const metadata = await pdf.getMetadata();
+  const pdf = await settleWithAbort(() => getDocumentProxy(new Uint8Array(buffer)), signal);
+  const metadata = await settleWithAbort(() => pdf.getMetadata(), signal);
   const metadataInfo = metadata.info && typeof metadata.info === "object"
     ? metadata.info as Record<string, unknown>
     : null;
@@ -63,8 +67,8 @@ export async function extractPDFToMarkdown(
   // Extract text page by page for better structure
   const pages: { pageNum: number; text: string }[] = [];
   for (let i = 1; i <= pagesToExtract; i++) {
-    const page = await pdf.getPage(i);
-    const textContent = await page.getTextContent();
+    const page = await settleWithAbort(() => pdf.getPage(i), signal);
+    const textContent = await settleWithAbort(() => page.getTextContent(), signal);
     const pageText = textContent.items
       .map((item: unknown) => {
         const textItem = item as { str?: string };
@@ -119,9 +123,13 @@ export async function extractPDFToMarkdown(
 
   // Ensure output directory exists
   await mkdir(outputDir, { recursive: true });
+  if (signal?.aborted) throw abortReason(signal);
 
   // Write file
-  await writeFile(outputPath, content, "utf-8");
+  await settleWithAbort(
+    () => writeFile(outputPath, content, { encoding: "utf-8", signal }),
+    signal,
+  );
 
   return {
     title,

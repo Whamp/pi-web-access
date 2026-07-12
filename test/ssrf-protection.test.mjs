@@ -7,10 +7,12 @@ const publicLookup = async () => [{ address: "93.184.216.34", family: 4 }];
 
 function deferred() {
 	let resolve;
-	const promise = new Promise((resolvePromise) => {
+	let reject;
+	const promise = new Promise((resolvePromise, rejectPromise) => {
 		resolve = resolvePromise;
+		reject = rejectPromise;
 	});
-	return { promise, resolve };
+	return { promise, resolve, reject };
 }
 
 async function settlesWithin(promise, label) {
@@ -88,8 +90,16 @@ test("validateRemoteUrl abandons a non-settling DNS lookup on cancellation", asy
 	});
 	controller.abort(reason);
 	await assert.rejects(settlesWithin(validation, "DNS cancellation"), (error) => error === reason);
-	lookupGate.resolve([{ address: "93.184.216.34", family: 4 }]);
-	await new Promise((resolve) => setImmediate(resolve));
+	const unhandled = [];
+	const onUnhandled = (error) => unhandled.push(error);
+	process.on("unhandledRejection", onUnhandled);
+	try {
+		lookupGate.reject(new Error("late DNS failure"));
+		await new Promise((resolve) => setImmediate(resolve));
+	} finally {
+		process.removeListener("unhandledRejection", onUnhandled);
+	}
+	assert.deepEqual(unhandled, []);
 });
 
 test("fetchRemoteUrl validates redirect targets before following", async () => {

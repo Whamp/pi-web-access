@@ -619,7 +619,7 @@ export default function (pi: ExtensionAPI) {
 					if (executionSignal.aborted) throw executionSignal.reason;
 					if (!deadlineSignal.aborted) throw error;
 				}
-				const timedOut = deadlineSignal.aborted;
+				const timedOut = deadlineSignal.aborted && (item === undefined || item.error === "Aborted");
 				const result = timedOut
 					? { url, title: item?.title ?? "", content: item?.content ?? "", error: CONTENT_TIMEOUT_ERROR }
 					: (item ?? { url, title: "", content: "", error: "Content retrieval failed" });
