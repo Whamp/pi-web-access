@@ -12,10 +12,12 @@ const extensionPath = fileURLToPath(new URL("../index.ts", import.meta.url));
 
 function deferred() {
 	let resolve;
-	const promise = new Promise((resolvePromise) => {
+	let reject;
+	const promise = new Promise((resolvePromise, rejectPromise) => {
 		resolve = resolvePromise;
+		reject = rejectPromise;
 	});
-	return { promise, resolve };
+	return { promise, resolve, reject };
 }
 
 async function settlesWithin(promise, label) {
@@ -340,7 +342,7 @@ test("shutdown terminally abandons a non-settling content step", async () => {
 	assert.equal(result.details.cancelReason, "session-changed");
 	assert.deepEqual(runtime.entries, []);
 	assert.deepEqual(runtime.sent, []);
-	await assertNoLateEffects(runtime, updates, () => slowFetch.resolve(jinaResponse("http://127.0.0.1/slow", "Slow")), () => requestsAfterCancellation);
+	await assertNoLateEffects(runtime, updates, () => slowFetch.reject(new Error("late network failure")), () => requestsAfterCancellation);
 });
 
 test("duplicate source URLs are fetched and stored once in first-result order", async () => {
