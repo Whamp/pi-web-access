@@ -348,6 +348,79 @@ test("caller cancellation closes a direct HTTP body before tool settlement", asy
 	await assertNoLateEffects(runtime, updates, () => {}, () => requestsAfterCancellation);
 });
 
+test("fallback closes a failed direct HTTP body before tool settlement", async () => {
+	const runtime = await createRuntime("failed-body-fallback");
+	let bodyCancelled = false;
+	globalThis.fetch = async (url) => {
+		const requestUrl = String(url);
+		if (requestUrl.startsWith("https://api.search.brave.com/res/v1/web/search")) return braveSearchResponse(["http://127.0.0.1/direct"]);
+		if (requestUrl === "http://127.0.0.1/direct") {
+			const body = new ReadableStream({
+				start(streamController) {
+					streamController.enqueue(new TextEncoder().encode("upstream failure"));
+				},
+				cancel() {
+					bodyCancelled = true;
+				},
+			});
+			return new Response(body, { status: 502 });
+		}
+		if (requestUrl === "https://r.jina.ai/http://127.0.0.1/direct") {
+			return jinaResponse("http://127.0.0.1/direct", "Fallback content");
+		}
+		throw new Error(`Unexpected fetch: ${requestUrl}`);
+	};
+
+	const result = await tool(runtime.extension, "web_search").execute(
+		"failed-body-fallback-search",
+		{ query: "failed direct body", provider: "brave", workflow: "none", includeContent: true },
+		undefined,
+		undefined,
+		runtime.context,
+	);
+
+	assert.equal(result.details.contentReady, 1);
+	assert.equal(bodyCancelled, true, "the failed direct response body must close before fallback completes");
+});
+
+test("terminal content closes oversized and unsupported response bodies", async () => {
+	const runtime = await createRuntime("discarded-response-bodies");
+	const cancelledBodies = new Set();
+	const discardedResponse = (name, headers) => new Response(new ReadableStream({
+		start(controller) {
+			controller.enqueue(new TextEncoder().encode(name));
+		},
+		cancel() {
+			cancelledBodies.add(name);
+		},
+	}), { status: 200, headers });
+	globalThis.fetch = async (url) => {
+		const requestUrl = String(url);
+		if (requestUrl.startsWith("https://api.search.brave.com/res/v1/web/search")) {
+			return braveSearchResponse(["http://127.0.0.1/oversized", "http://127.0.0.1/image"]);
+		}
+		if (requestUrl === "http://127.0.0.1/oversized") {
+			return discardedResponse("oversized", { "content-type": "text/plain", "content-length": String(6 * 1024 * 1024) });
+		}
+		if (requestUrl === "http://127.0.0.1/image") {
+			return discardedResponse("unsupported", { "content-type": "image/png" });
+		}
+		throw new Error(`Unexpected fetch: ${requestUrl}`);
+	};
+
+	const result = await tool(runtime.extension, "web_search").execute(
+		"discarded-response-bodies-search",
+		{ query: "discarded response bodies", provider: "brave", workflow: "none", includeContent: true },
+		undefined,
+		undefined,
+		runtime.context,
+	);
+
+	assert.equal(result.details.contentReady, 0);
+	assert.equal(result.details.contentErrors, 2);
+	assert.deepEqual(cancelledBodies, new Set(["oversized", "unsupported"]));
+});
+
 test("caller cancellation terminates GitHub CLI work before tool settlement", async () => {
 	const runtime = await createRuntime("github-cli-cancel");
 	const controller = new AbortController();

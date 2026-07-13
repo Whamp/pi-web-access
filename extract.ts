@@ -3,7 +3,7 @@ import { parseHTML } from "linkedom";
 import TurndownService from "turndown";
 import pLimit from "p-limit";
 import { activityMonitor } from "./activity.ts";
-import { abortReason, settleWithAbort } from "./abort.ts";
+import { settleWithAbort } from "./abort.ts";
 import { extractRSCContent } from "./rsc-extract.ts";
 import { extractPDFToMarkdown, isPDF } from "./pdf-extract.ts";
 import { extractGitHub } from "./github-extract.ts";
@@ -14,6 +14,7 @@ import { isVideoFile, extractVideo, extractVideoFrame, getLocalVideoDuration } f
 import { existsSync, readFileSync } from "node:fs";
 import { fetchRemoteUrl, validateRemoteUrl, type Lookup } from "./ssrf-protection.ts";
 import { formatSeconds, getWebSearchConfigPath } from "./utils.ts";
+import { discardResponseBody, readResponseBytes } from "./response-body.ts";
 
 const DEFAULT_TIMEOUT_MS = 30000;
 const CONCURRENT_LIMIT = 3;
@@ -528,55 +529,6 @@ function isLikelyJSRendered(html: string): boolean {
 	return textContent.length < 500 && scriptCount > 3;
 }
 
-async function readResponseBytes(response: Response, signal?: AbortSignal): Promise<Uint8Array> {
-	if (!response.body) {
-		const buffer = await response.arrayBuffer();
-		signal?.throwIfAborted();
-		return new Uint8Array(buffer);
-	}
-
-	const reader = response.body.getReader();
-	let cancellation: Promise<void> | undefined;
-	const cancel = (reason: unknown): Promise<void> => {
-		cancellation ??= reader.cancel(reason);
-		return cancellation;
-	};
-	const onAbort = (): void => {
-		if (signal) void cancel(abortReason(signal)).catch(() => {});
-	};
-	signal?.addEventListener("abort", onAbort, { once: true });
-
-	try {
-		const chunks: Uint8Array[] = [];
-		let size = 0;
-		while (true) {
-			const { done, value } = await reader.read();
-			if (done) break;
-			chunks.push(value);
-			size += value.byteLength;
-		}
-		signal?.throwIfAborted();
-
-		const bytes = new Uint8Array(size);
-		let offset = 0;
-		for (const chunk of chunks) {
-			bytes.set(chunk, offset);
-			offset += chunk.byteLength;
-		}
-		return bytes;
-	} catch (error) {
-		if (signal?.aborted) {
-			await cancel(abortReason(signal)).catch(() => {});
-			throw abortReason(signal);
-		}
-		await cancel(error).catch(() => {});
-		throw error;
-	} finally {
-		signal?.removeEventListener("abort", onAbort);
-		reader.releaseLock();
-	}
-}
-
 async function extractViaHttp(
 	url: string,
 	signal?: AbortSignal,
@@ -612,6 +564,7 @@ async function extractViaHttp(
 		);
 
 		if (!response.ok) {
+			await discardResponseBody(response);
 			activityMonitor.logComplete(activityId, response.status);
 			return {
 				url,
@@ -628,6 +581,7 @@ async function extractViaHttp(
 		if (contentLengthHeader) {
 			const contentLength = parseInt(contentLengthHeader, 10);
 			if (contentLength > maxResponseSize) {
+				await discardResponseBody(response);
 				activityMonitor.logComplete(activityId, response.status);
 				return {
 					url,
@@ -662,6 +616,7 @@ async function extractViaHttp(
 			contentType.includes("audio/") ||
 			contentType.includes("video/") ||
 			contentType.includes("application/zip")) {
+			await discardResponseBody(response);
 			activityMonitor.logComplete(activityId, response.status);
 			return {
 				url,

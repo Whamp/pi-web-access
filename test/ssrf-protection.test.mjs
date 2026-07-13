@@ -111,14 +111,24 @@ test("fetchRemoteUrl validates redirect targets before following", async () => {
 
 test("fetchRemoteUrl follows validated public redirects manually", async () => {
 	const requested = [];
+	let redirectBodyCancelled = false;
 	const fetchImpl = async (url) => {
 		requested.push(url.toString());
 		if (requested.length === 1) {
-			return new Response("", {
+			const body = new ReadableStream({
+				start(controller) {
+					controller.enqueue(new TextEncoder().encode("redirect"));
+				},
+				cancel() {
+					redirectBodyCancelled = true;
+				},
+			});
+			return new Response(body, {
 				status: 301,
 				headers: { location: "/next" },
 			});
 		}
+		assert.equal(redirectBodyCancelled, true, "redirect body must close before the next request");
 		return new Response("ok", { status: 200 });
 	};
 

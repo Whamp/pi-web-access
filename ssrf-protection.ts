@@ -2,6 +2,7 @@ import { Resolver } from "node:dns/promises";
 import net from "node:net";
 
 import { abortReason, settleWithAbort } from "./abort.ts";
+import { discardResponseBody } from "./response-body.ts";
 
 const DEFAULT_MAX_REDIRECTS = 5;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
@@ -119,8 +120,12 @@ export async function fetchRemoteUrl(
 
 		const location = response.headers.get("location");
 		if (!location) return response;
-		if (redirects === maxRedirects) throw new Error(`Too many redirects fetching ${current.toString()}`);
+		if (redirects === maxRedirects) {
+			await discardResponseBody(response, "Redirect limit reached");
+			throw new Error(`Too many redirects fetching ${current.toString()}`);
+		}
 
+		await discardResponseBody(response, "Following redirect");
 		current = await validateRemoteUrl(new URL(location, current), { ...options, signal: requestInit.signal ?? undefined });
 		if (response.status === 303 || ((response.status === 301 || response.status === 302) && requestInit.method?.toUpperCase() === "POST")) {
 			const { body: _body, ...nextInit } = requestInit;
