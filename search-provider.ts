@@ -53,6 +53,7 @@ export interface SearchProviderRequest {
 
 export interface SearchProviderEligibilityRequest {
 	extensionContext?: ExtensionContext;
+	signal?: AbortSignal;
 }
 
 export interface SearchProviderAdapter<Name extends ResolvedSearchProvider = ResolvedSearchProvider> {

@@ -1,8 +1,9 @@
 import { Readability } from "@mozilla/readability";
 import { parseHTML } from "linkedom";
 import TurndownService from "turndown";
-import pLimit from "p-limit";
 import { activityMonitor } from "./activity.ts";
+import { settleWithAbort } from "./abort.ts";
+import { createAbortableLimiter } from "./abortable-limit.ts";
 import { extractRSCContent } from "./rsc-extract.ts";
 import { extractPDFToMarkdown, isPDF } from "./pdf-extract.ts";
 import { extractGitHub } from "./github-extract.ts";
@@ -13,6 +14,7 @@ import { isVideoFile, extractVideo, extractVideoFrame, getLocalVideoDuration } f
 import { existsSync, readFileSync } from "node:fs";
 import { fetchRemoteUrl, validateRemoteUrl, type Lookup } from "./ssrf-protection.ts";
 import { formatSeconds, getWebSearchConfigPath } from "./utils.ts";
+import { discardResponseBody, fetchOwnedResponse, readResponseBytes, readResponseText } from "./response-body.ts";
 
 const DEFAULT_TIMEOUT_MS = 30000;
 const CONCURRENT_LIMIT = 3;
@@ -75,7 +77,7 @@ const turndown = new TurndownService({
 	codeBlockStyle: "fenced",
 });
 
-const fetchLimit = pLimit(CONCURRENT_LIMIT);
+const fetchLimit = createAbortableLimiter(CONCURRENT_LIMIT);
 
 export interface VideoFrame {
 	data: string;
@@ -120,24 +122,25 @@ async function extractWithJinaReader(
 	const activityId = activityMonitor.logStart({ type: "api", query: `jina: ${url}` });
 
 	try {
-		await validateRemoteUrl(url, { allowRanges: loadSsrfAllowRanges(), lookup });
-		const res = await fetch(jinaUrl, {
+		const requestSignal = AbortSignal.any([
+			AbortSignal.timeout(JINA_TIMEOUT_MS),
+			...(signal ? [signal] : []),
+		]);
+		await validateRemoteUrl(url, { allowRanges: loadSsrfAllowRanges(), lookup, signal: requestSignal });
+		const res = await fetchOwnedResponse(jinaUrl, {
 			headers: {
 				"Accept": "text/markdown",
 				"X-No-Cache": "true",
 			},
-			signal: AbortSignal.any([
-				AbortSignal.timeout(JINA_TIMEOUT_MS),
-				...(signal ? [signal] : []),
-			]),
-		});
+		}, requestSignal);
 
 		if (!res.ok) {
+			await discardResponseBody(res, "Jina request failed", requestSignal);
 			activityMonitor.logComplete(activityId, res.status);
 			return null;
 		}
 
-		const content = await res.text();
+		const content = await readResponseText(res, requestSignal);
 		activityMonitor.logComplete(activityId, res.status);
 
 		const contentStart = content.indexOf("Markdown Content:");
@@ -407,7 +410,7 @@ export async function extractContent(
 	try {
 		const parsed = new URL(url);
 		if (parsed.protocol === "http:" || parsed.protocol === "https:") {
-			await validateRemoteUrl(parsed, { allowRanges: loadSsrfAllowRanges(), lookup: options?.lookup });
+			await validateRemoteUrl(parsed, { allowRanges: loadSsrfAllowRanges(), lookup: options?.lookup, signal });
 		}
 	} catch (err) {
 		return { url, title: "", content: "", error: errorMessage(err) };
@@ -557,10 +560,11 @@ async function extractViaHttp(
 					"Upgrade-Insecure-Requests": "1",
 				},
 			},
-			{ allowRanges: loadSsrfAllowRanges(), lookup: options?.lookup },
+			{ allowRanges: loadSsrfAllowRanges(), lookup: options?.lookup, signal: controller.signal },
 		);
 
 		if (!response.ok) {
+			await discardResponseBody(response, "HTTP request failed", controller.signal);
 			activityMonitor.logComplete(activityId, response.status);
 			return {
 				url,
@@ -577,6 +581,7 @@ async function extractViaHttp(
 		if (contentLengthHeader) {
 			const contentLength = parseInt(contentLengthHeader, 10);
 			if (contentLength > maxResponseSize) {
+				await discardResponseBody(response, "Response exceeded the content limit", controller.signal);
 				activityMonitor.logComplete(activityId, response.status);
 				return {
 					url,
@@ -589,8 +594,8 @@ async function extractViaHttp(
 
 		if (isPDFContent) {
 			try {
-				const buffer = await response.arrayBuffer();
-				const result = await extractPDFToMarkdown(buffer, url);
+				const bytes = await readResponseBytes(response, controller.signal);
+				const result = await extractPDFToMarkdown(bytes.buffer, url, { signal: controller.signal });
 				activityMonitor.logComplete(activityId, response.status);
 				return {
 					url,
@@ -599,6 +604,7 @@ async function extractViaHttp(
 					error: null,
 				};
 			} catch (err) {
+				if (controller.signal.aborted) throw err;
 				const message = err instanceof Error ? err.message : String(err);
 				activityMonitor.logError(activityId, message);
 				return { url, title: "", content: "", error: `PDF extraction failed: ${message}` };
@@ -610,6 +616,7 @@ async function extractViaHttp(
 			contentType.includes("audio/") ||
 			contentType.includes("video/") ||
 			contentType.includes("application/zip")) {
+			await discardResponseBody(response, "Unsupported content type", controller.signal);
 			activityMonitor.logComplete(activityId, response.status);
 			return {
 				url,
@@ -619,7 +626,7 @@ async function extractViaHttp(
 			};
 		}
 
-		const text = await response.text();
+		const text = new TextDecoder().decode(await readResponseBytes(response, controller.signal));
 		const isHTML = contentType.includes("text/html") || contentType.includes("application/xhtml+xml");
 
 		if (!isHTML) {
@@ -695,10 +702,26 @@ function extractTextTitle(text: string, url: string): string {
 	return extractHeadingTitle(text) ?? (new URL(url).pathname.split("/").pop() || url);
 }
 
+function fetchLimitedContent(
+	url: string,
+	signal?: AbortSignal,
+	options?: ExtractOptions,
+): Promise<ExtractedContent> {
+	return fetchLimit.run(async () => {
+		if (signal?.aborted) return abortedResult(url);
+		try {
+			return await extractContent(url, signal, options);
+		} catch (error) {
+			if (signal?.aborted) return abortedResult(url);
+			throw error;
+		}
+	}, signal);
+}
+
 export async function fetchAllContent(
 	urls: string[],
 	signal?: AbortSignal,
 	options?: ExtractOptions,
 ): Promise<ExtractedContent[]> {
-	return Promise.all(urls.map((url) => fetchLimit(() => extractContent(url, signal, options))));
+	return Promise.all(urls.map((url) => fetchLimitedContent(url, signal, options)));
 }

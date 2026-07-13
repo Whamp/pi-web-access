@@ -2,6 +2,7 @@ import { existsSync, readFileSync, rmSync, statSync, readdirSync, openSync, read
 import { execFile } from "node:child_process";
 import { extname, join, resolve as resolvePath, sep as pathSep } from "node:path";
 import { activityMonitor } from "./activity.ts";
+import { settleWithAbort } from "./abort.ts";
 import type { ExtractedContent } from "./extract.ts";
 import { checkGhAvailable, checkRepoSize, fetchViaApi, showGhHint } from "./github-api.ts";
 import { getWebSearchConfigPath } from "./utils.ts";
@@ -173,6 +174,7 @@ function cloneDir(config: GitHubCloneConfig, owner: string, repo: string, ref?: 
 }
 
 function execClone(args: string[], localPath: string, timeoutMs: number, signal?: AbortSignal): Promise<string | null> {
+	if (signal?.aborted) return Promise.resolve(null);
 	return new Promise((resolve) => {
 		const child = execFile(args[0], args.slice(1), { timeout: timeoutMs }, (err) => {
 			if (err) {
@@ -187,7 +189,7 @@ function execClone(args: string[], localPath: string, timeoutMs: number, signal?
 		});
 
 		if (signal) {
-			const onAbort = () => child.kill();
+			const onAbort = () => child.kill("SIGKILL");
 			signal.addEventListener("abort", onAbort, { once: true });
 			child.on("exit", () => signal.removeEventListener("abort", onAbort));
 		}
@@ -209,7 +211,7 @@ async function cloneRepo(
 	}
 
 	const timeoutMs = config.cloneTimeoutSeconds * 1000;
-	const hasGh = await checkGhAvailable();
+	const hasGh = await checkGhAvailable(signal);
 
 	if (hasGh) {
 		const args = ["gh", "repo", "clone", `${owner}/${repo}`, localPath, "--", "--depth", "1", "--single-branch"];
@@ -504,14 +506,20 @@ async function awaitCachedClone(
 	signal?: AbortSignal,
 ): Promise<ExtractedContent | null> {
 	if (signal?.aborted) return null;
-	const result = await cached.clonePromise;
+	let result: string | null;
+	try {
+		result = await settleWithAbort(() => cached.clonePromise, signal);
+	} catch (error) {
+		if (signal?.aborted) return null;
+		throw error;
+	}
 	if (signal?.aborted) return null;
 	if (result) {
 		const content = generateContent(result, info);
 		const title = info.path ? `${owner}/${repo} - ${info.path}` : `${owner}/${repo}`;
 		return { url, title, content, error: null };
 	}
-	return fetchViaApi(url, owner, repo, info);
+	return fetchViaApi(url, owner, repo, info, undefined, signal);
 }
 
 export async function extractGitHub(
@@ -536,90 +544,98 @@ export async function extractGitHub(
 	if (info.refIsFullSha) {
 		if (signal?.aborted) return null;
 		const sizeNote = `Note: Commit SHA URLs use the GitHub API instead of cloning.`;
-		return fetchViaApi(url, owner, repo, info, sizeNote);
+		return fetchViaApi(url, owner, repo, info, sizeNote, signal);
 	}
 
 	const activityId = activityMonitor.logStart({ type: "fetch", url: `github.com/${owner}/${repo}` });
 
-	if (!forceClone) {
-		const sizeKB = await checkRepoSize(owner, repo);
-		if (signal?.aborted) {
-			activityMonitor.logComplete(activityId, 0);
-			return null;
-		}
-		if (sizeKB !== null) {
-			const sizeMB = sizeKB / 1024;
-			if (sizeMB > config.maxRepoSizeMB) {
-				if (signal?.aborted) {
-					activityMonitor.logComplete(activityId, 0);
-					return null;
-				}
-				const sizeNote =
-					`Note: Repository is ${Math.round(sizeMB)}MB (threshold: ${config.maxRepoSizeMB}MB). ` +
-					`Showing API-fetched content instead of full clone. Ask the user if they'd like to clone the full repo -- ` +
-					`if yes, call fetch_content again with the same URL and add forceClone: true to the params.`;
-				const apiView = await fetchViaApi(url, owner, repo, info, sizeNote);
-				if (apiView) {
-					activityMonitor.logComplete(activityId, 200);
-					return apiView;
-				}
-				activityMonitor.logError(activityId, "api fallback unavailable for oversized repository");
+	try {
+		if (!forceClone) {
+			const sizeKB = await checkRepoSize(owner, repo, signal);
+			if (signal?.aborted) {
+				activityMonitor.logComplete(activityId, 0);
 				return null;
 			}
+			if (sizeKB !== null) {
+				const sizeMB = sizeKB / 1024;
+				if (sizeMB > config.maxRepoSizeMB) {
+					if (signal?.aborted) {
+						activityMonitor.logComplete(activityId, 0);
+						return null;
+					}
+					const sizeNote =
+						`Note: Repository is ${Math.round(sizeMB)}MB (threshold: ${config.maxRepoSizeMB}MB). ` +
+						`Showing API-fetched content instead of full clone. Ask the user if they'd like to clone the full repo -- ` +
+						`if yes, call fetch_content again with the same URL and add forceClone: true to the params.`;
+					const apiView = await fetchViaApi(url, owner, repo, info, sizeNote, signal);
+					if (apiView) {
+						activityMonitor.logComplete(activityId, 200);
+						return apiView;
+					}
+					activityMonitor.logError(activityId, "api fallback unavailable for oversized repository");
+					return null;
+				}
+			}
 		}
-	}
 
-	if (signal?.aborted) {
-		activityMonitor.logComplete(activityId, 0);
-		return null;
-	}
-
-	// Re-check: another concurrent caller may have started a clone while we awaited the size check
-	const cachedAfterSizeCheck = cloneCache.get(key);
-	if (cachedAfterSizeCheck) {
-		const cachedResult = await awaitCachedClone(cachedAfterSizeCheck, url, owner, repo, info, signal);
-		if (signal?.aborted) {
-			activityMonitor.logComplete(activityId, 0);
-		} else if (cachedResult) {
-			activityMonitor.logComplete(activityId, 200);
-		} else {
-			activityMonitor.logError(activityId, "clone failed");
-		}
-		return cachedResult;
-	}
-
-	const clonePromise = cloneRepo(owner, repo, info.ref, config, signal);
-	const localPath = cloneDir(config, owner, repo, info.ref);
-	cloneCache.set(key, { localPath, clonePromise });
-
-	const result = await clonePromise;
-	if (signal?.aborted) {
-		if (!result) cloneCache.delete(key);
-		activityMonitor.logComplete(activityId, 0);
-		return null;
-	}
-
-	if (!result) {
-		cloneCache.delete(key);
 		if (signal?.aborted) {
 			activityMonitor.logComplete(activityId, 0);
 			return null;
 		}
 
-		const apiFallback = await fetchViaApi(url, owner, repo, info);
-		if (apiFallback) {
-			activityMonitor.logComplete(activityId, 200);
-			return apiFallback;
+		// Re-check: another concurrent caller may have started a clone while we awaited the size check
+		const cachedAfterSizeCheck = cloneCache.get(key);
+		if (cachedAfterSizeCheck) {
+			const cachedResult = await awaitCachedClone(cachedAfterSizeCheck, url, owner, repo, info, signal);
+			if (signal?.aborted) {
+				activityMonitor.logComplete(activityId, 0);
+			} else if (cachedResult) {
+				activityMonitor.logComplete(activityId, 200);
+			} else {
+				activityMonitor.logError(activityId, "clone failed");
+			}
+			return cachedResult;
 		}
 
-		activityMonitor.logError(activityId, "clone and API fallback failed");
-		return null;
-	}
+		const clonePromise = cloneRepo(owner, repo, info.ref, config, signal);
+		const localPath = cloneDir(config, owner, repo, info.ref);
+		cloneCache.set(key, { localPath, clonePromise });
 
-	activityMonitor.logComplete(activityId, 200);
-	const content = generateContent(result, info);
-	const title = info.path ? `${owner}/${repo} - ${info.path}` : `${owner}/${repo}`;
-	return { url, title, content, error: null };
+		const result = await clonePromise;
+		if (signal?.aborted) {
+			if (!result) cloneCache.delete(key);
+			activityMonitor.logComplete(activityId, 0);
+			return null;
+		}
+
+		if (!result) {
+			cloneCache.delete(key);
+			if (signal?.aborted) {
+				activityMonitor.logComplete(activityId, 0);
+				return null;
+			}
+
+			const apiFallback = await fetchViaApi(url, owner, repo, info, undefined, signal);
+			if (apiFallback) {
+				activityMonitor.logComplete(activityId, 200);
+				return apiFallback;
+			}
+
+			activityMonitor.logError(activityId, "clone and API fallback failed");
+			return null;
+		}
+
+		activityMonitor.logComplete(activityId, 200);
+		const content = generateContent(result, info);
+		const title = info.path ? `${owner}/${repo} - ${info.path}` : `${owner}/${repo}`;
+		return { url, title, content, error: null };
+	} catch (error) {
+		if (signal?.aborted) {
+			activityMonitor.logComplete(activityId, 0);
+			return null;
+		}
+		throw error;
+	}
 }
 
 export function clearCloneCache(): void {

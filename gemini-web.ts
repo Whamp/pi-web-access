@@ -1,6 +1,7 @@
 import { basename } from "node:path";
 import { type CookieMap, getGoogleCookies } from "./chrome-cookies.ts";
 import { getChromeProfileFromConfig, isBrowserCookieAccessAllowed, normalizeChromeProfile } from "./gemini-web-config.ts";
+import { discardResponseBody, fetchOwnedResponse, readResponseText } from "./response-body.ts";
 
 const GEMINI_APP_URL = "https://gemini.google.com/app";
 const GEMINI_STREAM_GENERATE_URL =
@@ -127,7 +128,7 @@ async function runGeminiWebOnce(
 	params.set("at", accessToken);
 	params.set("f.req", fReq);
 
-	const res = await fetch(GEMINI_STREAM_GENERATE_URL, {
+	const res = await fetchOwnedResponse(GEMINI_STREAM_GENERATE_URL, {
 		method: "POST",
 		headers: {
 			"content-type": "application/x-www-form-urlencoded;charset=utf-8",
@@ -140,10 +141,9 @@ async function runGeminiWebOnce(
 			[MODEL_HEADER_NAME]: MODEL_HEADERS[model],
 		},
 		body: params.toString(),
-		signal: effectiveSignal,
-	});
+	}, effectiveSignal);
 
-	const rawText = await res.text();
+	const rawText = await readResponseText(res, effectiveSignal);
 
 	if (!res.ok) {
 		return { text: "", errorMessage: `Gemini request failed: ${res.status}` };
@@ -188,19 +188,19 @@ async function fetchWithCookieRedirects(
 ): Promise<string> {
 	let current = url;
 	for (let i = 0; i <= maxRedirects; i++) {
-		const res = await fetch(current, {
+		const res = await fetchOwnedResponse(current, {
 			headers: { "user-agent": USER_AGENT, cookie: cookieHeader },
 			redirect: "manual",
-			signal,
-		});
+		}, signal);
 		if (res.status >= 300 && res.status < 400) {
 			const location = res.headers.get("location");
 			if (location) {
+				await discardResponseBody(res, "Following Gemini Web redirect", signal);
 				current = new URL(location, current).toString();
 				continue;
 			}
 		}
-		return await res.text();
+		return await readResponseText(res, signal);
 	}
 	throw new Error(`Too many redirects (>${maxRedirects})`);
 }
@@ -294,7 +294,7 @@ async function uploadFile(
 		Buffer.from(footer, "utf-8"),
 	]);
 
-	const res = await fetch(GEMINI_UPLOAD_URL, {
+	const res = await fetchOwnedResponse(GEMINI_UPLOAD_URL, {
 		method: "POST",
 		headers: {
 			"content-type": `multipart/form-data; boundary=${boundary}`,
@@ -303,15 +303,14 @@ async function uploadFile(
 			cookie: cookieHeader,
 		},
 		body,
-		signal,
-	});
+	}, signal);
+	const text = await readResponseText(res, signal);
 
 	if (!res.ok) {
-		const text = await res.text();
 		throw new Error(`File upload failed: ${res.status} (${text.slice(0, 200)})`);
 	}
 
-	return { id: await res.text(), name: fileName };
+	return { id: text, name: fileName };
 }
 
 function buildFReqPayload(

@@ -1,5 +1,6 @@
-import { complete, type Message, type Model } from "@earendil-works/pi-ai/compat";
+import { stream, type Message, type Model } from "@earendil-works/pi-ai/compat";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { settleWithAbort } from "./abort.ts";
 import { loadEnabledModelPatterns, modelMatchesEnabledPatterns } from "./summary-model-scope.ts";
 import type { QueryResultData } from "./storage.ts";
 
@@ -192,6 +193,7 @@ function parseModelSelector(value: string): { provider: string; id: string } {
 async function resolveSummaryModelCandidates(
 	ctx: SummaryGenerationContext,
 	modelOverride?: string,
+	signal?: AbortSignal,
 ): Promise<{ candidates: Array<{ model: Model; apiKey: string; headers?: Record<string, string> }>; errors: string[] }> {
 	const enabledModelPatterns = loadEnabledModelPatterns(ctx);
 	const specs: Array<{ provider: string; id: string }> = [];
@@ -216,7 +218,7 @@ async function resolveSummaryModelCandidates(
 			errors.push(`Summary model is not enabled: ${value}`);
 			continue;
 		}
-		const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+		const auth = await settleWithAbort(() => ctx.modelRegistry.getApiKeyAndHeaders(model), signal);
 		if (!auth.ok || !auth.apiKey) {
 			errors.push(`No API key available for summary model ${value}`);
 			continue;
@@ -235,13 +237,6 @@ function buildFallbackSummary(results: QueryResultData[], fallbackReason: string
 			fallbackReason,
 		},
 	};
-}
-
-function isAbortError(err: unknown): boolean {
-	if (!err || typeof err !== "object") return false;
-	const name = (err as { name?: unknown }).name;
-	const message = (err as { message?: unknown }).message;
-	return name === "AbortError" || (typeof message === "string" && message.toLowerCase().includes("abort"));
 }
 
 function getTextFromContentPart(part: unknown): string {
@@ -272,8 +267,9 @@ export async function generateSummaryDraft(
 	const prompt = buildSummaryPrompt(results, feedback);
 	let resolved: Awaited<ReturnType<typeof resolveSummaryModelCandidates>>;
 	try {
-		resolved = await resolveSummaryModelCandidates(ctx, modelOverride);
+		resolved = await resolveSummaryModelCandidates(ctx, modelOverride, signal);
 	} catch (err) {
+		signal?.throwIfAborted();
 		const message = err instanceof Error ? err.message : String(err);
 		return buildFallbackSummary(results, `summary-model-settings-error: ${message}`);
 	}
@@ -288,7 +284,22 @@ export async function generateSummaryDraft(
 				timestamp: Date.now(),
 			};
 
-			const response = await complete(model, { messages: [userMessage] }, { apiKey, headers, signal });
+			signal?.throwIfAborted();
+			const completion = stream(model, { messages: [userMessage] }, { apiKey, headers, signal });
+			const endOnAbort = (): void => {
+				try {
+					completion.end();
+				} catch {
+				}
+			};
+			signal?.addEventListener("abort", endOnAbort, { once: true });
+			if (signal?.aborted) endOnAbort();
+			let response: Awaited<ReturnType<typeof completion.result>>;
+			try {
+				response = await settleWithAbort(() => completion.result(), signal);
+			} finally {
+				signal?.removeEventListener("abort", endOnAbort);
+			}
 			if (response.stopReason === "aborted") {
 				throw new Error("Aborted");
 			}
@@ -317,10 +328,11 @@ export async function generateSummaryDraft(
 				},
 			};
 		} catch (err) {
-			if (isAbortError(err)) throw err;
+			signal?.throwIfAborted();
 			lastError = err instanceof Error ? err.message : String(err);
 		}
 	}
 
+	signal?.throwIfAborted();
 	return buildFallbackSummary(results, lastError ? `summary-model-unavailable: ${lastError}` : "summary-model-unavailable");
 }

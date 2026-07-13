@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { getWebSearchConfigPath } from "./utils.ts";
+import { fetchOwnedResponse, readResponseText } from "./response-body.ts";
 
 const DEFAULT_API_HOST = "https://generativelanguage.googleapis.com";
 const API_VERSION = "v1beta";
@@ -132,19 +133,18 @@ export async function queryGeminiApiWithVideo(
 		],
 	};
 
-	const res = await fetch(url, {
+	const res = await fetchOwnedResponse(url, {
 		method: "POST",
 		headers: { "Content-Type": "application/json", ...buildAuthHeaders() },
 		body: JSON.stringify(body),
-		signal,
-	});
+	}, signal);
 
 	if (!res.ok) {
-		const errorText = await res.text();
+		const errorText = await readResponseText(res, signal);
 		throw new Error(`Gemini API error ${res.status}: ${errorText.slice(0, 300)}`);
 	}
 
-	const data = (await res.json()) as GenerateContentResponse;
+	const data = JSON.parse(await readResponseText(res, signal)) as GenerateContentResponse;
 	const text = data.candidates?.[0]?.content?.parts
 		?.map((p) => p.text)
 		.filter(Boolean)
