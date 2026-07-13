@@ -303,12 +303,12 @@ test("caller cancellation terminally abandons a non-settling content step", asyn
 	await assertNoLateEffects(runtime, updates, () => slowFetch.resolve(jinaResponse("http://127.0.0.1/slow", "Slow")), () => requestsAfterCancellation);
 });
 
-test("caller cancellation terminally abandons a non-settling direct HTTP body", async () => {
+test("caller cancellation closes a direct HTTP body before tool settlement", async () => {
 	const runtime = await createRuntime("caller-cancel-body");
 	const controller = new AbortController();
 	const callerReason = new Error("caller cancelled body");
-	const bodyGate = deferred();
 	const updates = [];
+	let bodyCancelled = false;
 	let requestsAfterCancellation = 0;
 	let cancelled = false;
 	globalThis.fetch = async (url) => {
@@ -317,13 +317,15 @@ test("caller cancellation terminally abandons a non-settling direct HTTP body", 
 		if (requestUrl.startsWith("https://api.search.brave.com/res/v1/web/search")) return braveSearchResponse(["http://127.0.0.1/direct"]);
 		if (requestUrl === "https://r.jina.ai/http://127.0.0.1/direct") return new Response("too short", { status: 200 });
 		if (requestUrl === "http://127.0.0.1/direct") {
-			return {
-				ok: true,
-				status: 200,
-				statusText: "OK",
-				headers: new Headers({ "content-type": "text/plain" }),
-				text: () => bodyGate.promise,
-			};
+			const body = new ReadableStream({
+				start(streamController) {
+					streamController.enqueue(new TextEncoder().encode("partial body"));
+				},
+				cancel() {
+					bodyCancelled = true;
+				},
+			});
+			return new Response(body, { status: 200, headers: { "content-type": "text/plain" } });
 		}
 		throw new Error(`Unexpected fetch: ${requestUrl}`);
 	};
@@ -342,7 +344,8 @@ test("caller cancellation terminally abandons a non-settling direct HTTP body", 
 	cancelled = true;
 	controller.abort(callerReason);
 	await assert.rejects(settlesWithin(execution, "direct body caller cancellation"), (error) => error === callerReason);
-	await assertNoLateEffects(runtime, updates, () => bodyGate.resolve("late body"), () => requestsAfterCancellation);
+	assert.equal(bodyCancelled, true, "the response body must close before web_search settles");
+	await assertNoLateEffects(runtime, updates, () => {}, () => requestsAfterCancellation);
 });
 
 test("caller cancellation terminates GitHub CLI work before tool settlement", async () => {

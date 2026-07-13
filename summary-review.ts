@@ -239,13 +239,6 @@ function buildFallbackSummary(results: QueryResultData[], fallbackReason: string
 	};
 }
 
-function isAbortError(err: unknown): boolean {
-	if (!err || typeof err !== "object") return false;
-	const name = (err as { name?: unknown }).name;
-	const message = (err as { message?: unknown }).message;
-	return name === "AbortError" || (typeof message === "string" && message.toLowerCase().includes("abort"));
-}
-
 function getTextFromContentPart(part: unknown): string {
 	if (!part || typeof part !== "object") return "";
 	const value = part as Record<string, unknown>;
@@ -277,7 +270,6 @@ export async function generateSummaryDraft(
 		resolved = await resolveSummaryModelCandidates(ctx, modelOverride, signal);
 	} catch (err) {
 		signal?.throwIfAborted();
-		if (isAbortError(err)) throw err;
 		const message = err instanceof Error ? err.message : String(err);
 		return buildFallbackSummary(results, `summary-model-settings-error: ${message}`);
 	}
@@ -321,7 +313,7 @@ export async function generateSummaryDraft(
 				},
 			};
 		} catch (err) {
-			if (isAbortError(err)) throw err;
+			signal?.throwIfAborted();
 			lastError = err instanceof Error ? err.message : String(err);
 		}
 	}

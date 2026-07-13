@@ -184,13 +184,34 @@ test("auto-summary completes before web_search returns", async () => {
 	assert.match(result.content[0].text, /https:\/\/example\.com\/article/);
 });
 
+test("auto-summary falls back for non-cancellation authentication errors containing abort", async () => {
+	installSearchResponse();
+	const summaryModel = { provider: "openai-codex", id: "gpt-5.3-codex-spark", name: "Summary model" };
+	const runtime = await loadRuntime({}, {
+		getAvailable: () => [summaryModel],
+		find: (provider, id) => provider === summaryModel.provider && id === summaryModel.id ? summaryModel : undefined,
+		getApiKeyAndHeaders: async () => {
+			throw new Error("credential lookup aborted by upstream");
+		},
+	});
+
+	const result = await executeSearch(runtime, { query: "summary auth failure", provider: "brave", workflow: "auto-summary" });
+
+	assert.equal(result.details.summary.workflow, "auto-summary");
+	assert.equal(result.details.summary.fallbackUsed, true);
+	assert.match(result.details.summary.fallbackReason, /credential lookup aborted by upstream/);
+	assert.equal(runtime.entries.length, 1);
+});
+
 test("session replacement terminates provider authentication", async () => {
 	const authStarted = deferred();
 	const authGate = deferred();
+	let authCalls = 0;
 	const runtime = await loadRuntime({}, {
 		getAvailable: () => [],
 		find: () => undefined,
 		getApiKeyAndHeaders: async () => {
+			authCalls += 1;
 			authStarted.resolve();
 			return authGate.promise;
 		},
@@ -206,6 +227,7 @@ test("session replacement terminates provider authentication", async () => {
 
 	authGate.resolve({ ok: false });
 	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(authCalls, 1);
 	assert.deepEqual(runtime.entries, []);
 });
 

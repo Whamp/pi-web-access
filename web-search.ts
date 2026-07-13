@@ -103,7 +103,7 @@ export function createWebSearch(providers: SearchProviders): WebSearch {
 				let eligibility: ProviderEligibility;
 				try {
 					eligibility = await settleWithAbort(
-						() => selected.eligibility({ extensionContext: options.extensionContext }),
+						() => selected.eligibility({ extensionContext: options.extensionContext, signal: options.signal }),
 						options.signal,
 					);
 				} catch (error) {
@@ -133,7 +133,7 @@ export function createWebSearch(providers: SearchProviders): WebSearch {
 				let eligibility: ProviderEligibility;
 				try {
 					eligibility = await settleWithAbort(
-						() => candidate.eligibility({ extensionContext: options.extensionContext }),
+						() => candidate.eligibility({ extensionContext: options.extensionContext, signal: options.signal }),
 						options.signal,
 					);
 				} catch (error) {
