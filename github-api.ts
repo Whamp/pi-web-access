@@ -1,7 +1,6 @@
-import { execFile } from "node:child_process";
-import { abortReason } from "./abort.ts";
 import type { ExtractedContent } from "./extract.ts";
 import type { GitHubUrlInfo } from "./github-extract.ts";
+import { runProcess } from "./process-tree.ts";
 
 const MAX_TREE_ENTRIES = 200;
 const MAX_INLINE_FILE_CHARS = 100_000;
@@ -15,26 +14,7 @@ interface GhExecOptions {
 }
 
 function execGh(args: string[], options: GhExecOptions, signal?: AbortSignal): Promise<string> {
-	if (signal?.aborted) return Promise.reject(abortReason(signal));
-
-	return new Promise((resolve, reject) => {
-		const child = execFile("gh", args, options, (error, stdout) => {
-			signal?.removeEventListener("abort", onAbort);
-			if (signal?.aborted) {
-				reject(abortReason(signal));
-				return;
-			}
-			if (error) {
-				reject(error);
-				return;
-			}
-			resolve(stdout);
-		});
-		const onAbort = (): void => {
-			child.kill("SIGKILL");
-		};
-		signal?.addEventListener("abort", onAbort, { once: true });
-	});
+	return runProcess("gh", args, { timeoutMs: options.timeout, maxBuffer: options.maxBuffer }, signal);
 }
 
 function throwIfAborted(signal?: AbortSignal): void {

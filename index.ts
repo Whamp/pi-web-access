@@ -1284,6 +1284,7 @@ export default function (pi: ExtensionAPI) {
 				StringEnum(["auto", "openai", "brave", "parallel", "tavily", "exa", "perplexity", "gemini"], { description: "Search provider (default: auto)" }),
 			),
 			workflow: Type.Optional(Type.String({
+				pattern: "^(?:none|auto-summary|summary[-]review)$",
 				description: 'Search workflow mode: "none" = raw results (default), "auto-summary" = generate a summary before returning',
 			})),
 		}),

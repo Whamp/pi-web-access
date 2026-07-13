@@ -92,6 +92,63 @@ test("validateRemoteUrl waits for DNS cleanup on cancellation", async () => {
 	assert.equal(cleanupCompleteAtSettlement, true, "DNS cleanup must finish before validation settles");
 });
 
+test("fetchRemoteUrl closes a response that arrives after cancellation", async () => {
+	const controller = new AbortController();
+	const reason = new Error("cancel late response");
+	let resolveFetch;
+	let bodyCancelled = false;
+	const delayedResponse = new Promise((resolve) => {
+		resolveFetch = resolve;
+	});
+	const request = fetchRemoteUrl(
+		"https://example.com/",
+		{ signal: controller.signal },
+		{ lookup: publicLookup, fetch: () => delayedResponse },
+	);
+	await new Promise((resolve) => setImmediate(resolve));
+	controller.abort(reason);
+	await assert.rejects(settlesWithin(request, "late response cancellation"), (error) => error === reason);
+
+	resolveFetch(new Response(new ReadableStream({
+		start(streamController) {
+			streamController.enqueue(new TextEncoder().encode("late response"));
+		},
+		cancel() {
+			bodyCancelled = true;
+		},
+	}), { status: 200 }));
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(bodyCancelled, true, "the late response body must be closed");
+});
+
+test("fetchRemoteUrl closes a response when the transport aborts synchronously", async () => {
+	const controller = new AbortController();
+	const reason = new Error("synchronous transport cancellation");
+	let bodyCancelled = false;
+	const response = new Response(new ReadableStream({
+		start(streamController) {
+			streamController.enqueue(new TextEncoder().encode("late response"));
+		},
+		cancel() {
+			bodyCancelled = true;
+		},
+	}), { status: 200 });
+	const request = fetchRemoteUrl(
+		"https://example.com/",
+		{ signal: controller.signal },
+		{
+			lookup: publicLookup,
+			fetch: () => {
+				controller.abort(reason);
+				return Promise.resolve(response);
+			},
+		},
+	);
+	await assert.rejects(settlesWithin(request, "synchronous transport cancellation"), (error) => error === reason);
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(bodyCancelled, true, "the synchronously returned response body must be closed");
+});
+
 test("fetchRemoteUrl validates redirect targets before following", async () => {
 	const requested = [];
 	const fetchImpl = async (url) => {

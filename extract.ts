@@ -3,7 +3,7 @@ import { parseHTML } from "linkedom";
 import TurndownService from "turndown";
 import pLimit from "p-limit";
 import { activityMonitor } from "./activity.ts";
-import { settleWithAbort } from "./abort.ts";
+import { abortReason, settleWithAbort } from "./abort.ts";
 import { extractRSCContent } from "./rsc-extract.ts";
 import { extractPDFToMarkdown, isPDF } from "./pdf-extract.ts";
 import { extractGitHub } from "./github-extract.ts";
@@ -702,12 +702,14 @@ function extractTextTitle(text: string, url: string): string {
 	return extractHeadingTitle(text) ?? (new URL(url).pathname.split("/").pop() || url);
 }
 
-export async function fetchAllContent(
-	urls: string[],
+function fetchLimitedContent(
+	url: string,
 	signal?: AbortSignal,
 	options?: ExtractOptions,
-): Promise<ExtractedContent[]> {
-	return Promise.all(urls.map((url) => fetchLimit(async () => {
+): Promise<ExtractedContent> {
+	let started = false;
+	const operation = fetchLimit(async () => {
+		started = true;
 		if (signal?.aborted) return abortedResult(url);
 		try {
 			return await extractContent(url, signal, options);
@@ -715,5 +717,41 @@ export async function fetchAllContent(
 			if (signal?.aborted) return abortedResult(url);
 			throw error;
 		}
-	})));
+	});
+	if (!signal) return operation;
+
+	return new Promise<ExtractedContent>((resolve, reject) => {
+		let settled = false;
+		const onAbort = (): void => {
+			if (started || settled) return;
+			settled = true;
+			signal.removeEventListener("abort", onAbort);
+			reject(abortReason(signal));
+		};
+		signal.addEventListener("abort", onAbort, { once: true });
+		if (signal.aborted) onAbort();
+
+		operation.then(
+			(result) => {
+				if (settled) return;
+				settled = true;
+				signal.removeEventListener("abort", onAbort);
+				resolve(result);
+			},
+			(error: unknown) => {
+				if (settled) return;
+				settled = true;
+				signal.removeEventListener("abort", onAbort);
+				reject(error);
+			},
+		);
+	});
+}
+
+export async function fetchAllContent(
+	urls: string[],
+	signal?: AbortSignal,
+	options?: ExtractOptions,
+): Promise<ExtractedContent[]> {
+	return Promise.all(urls.map((url) => fetchLimitedContent(url, signal, options)));
 }

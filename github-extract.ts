@@ -1,10 +1,11 @@
 import { existsSync, readFileSync, rmSync, statSync, readdirSync, openSync, readSync, closeSync, realpathSync } from "node:fs";
-import { execFile } from "node:child_process";
 import { extname, join, resolve as resolvePath, sep as pathSep } from "node:path";
 import { activityMonitor } from "./activity.ts";
+import { settleWithAbort } from "./abort.ts";
 import type { ExtractedContent } from "./extract.ts";
 import { checkGhAvailable, checkRepoSize, fetchViaApi, showGhHint } from "./github-api.ts";
 import { getWebSearchConfigPath } from "./utils.ts";
+import { runProcess } from "./process-tree.ts";
 
 const CONFIG_PATH = getWebSearchConfigPath();
 
@@ -172,27 +173,17 @@ function cloneDir(config: GitHubCloneConfig, owner: string, repo: string, ref?: 
 	return join(config.clonePath, owner, dirName);
 }
 
-function execClone(args: string[], localPath: string, timeoutMs: number, signal?: AbortSignal): Promise<string | null> {
-	if (signal?.aborted) return Promise.resolve(null);
-	return new Promise((resolve) => {
-		const child = execFile(args[0], args.slice(1), { timeout: timeoutMs }, (err) => {
-			if (err) {
-				try {
-					rmSync(localPath, { recursive: true, force: true });
-				} catch {
-				}
-				resolve(null);
-				return;
-			}
-			resolve(localPath);
-		});
-
-		if (signal) {
-			const onAbort = () => child.kill("SIGKILL");
-			signal.addEventListener("abort", onAbort, { once: true });
-			child.on("exit", () => signal.removeEventListener("abort", onAbort));
+async function execClone(args: string[], localPath: string, timeoutMs: number, signal?: AbortSignal): Promise<string | null> {
+	try {
+		await runProcess(args[0], args.slice(1), { timeoutMs }, signal);
+		return localPath;
+	} catch {
+		try {
+			rmSync(localPath, { recursive: true, force: true });
+		} catch {
 		}
-	});
+		return null;
+	}
 }
 
 async function cloneRepo(
@@ -505,7 +496,13 @@ async function awaitCachedClone(
 	signal?: AbortSignal,
 ): Promise<ExtractedContent | null> {
 	if (signal?.aborted) return null;
-	const result = await cached.clonePromise;
+	let result: string | null;
+	try {
+		result = await settleWithAbort(() => cached.clonePromise, signal);
+	} catch (error) {
+		if (signal?.aborted) return null;
+		throw error;
+	}
 	if (signal?.aborted) return null;
 	if (result) {
 		const content = generateContent(result, info);

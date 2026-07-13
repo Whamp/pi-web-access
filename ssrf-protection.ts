@@ -115,6 +115,7 @@ export async function fetchRemoteUrl(
 		const response = await settleWithAbort(
 			() => fetchImpl(current, { ...requestInit, redirect: "manual" }),
 			requestInit.signal,
+			lateResponse => discardResponseBody(lateResponse, "Response arrived after request cancellation"),
 		);
 		if (!REDIRECT_STATUSES.has(response.status)) return response;
 

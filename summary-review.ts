@@ -284,7 +284,10 @@ export async function generateSummaryDraft(
 				timestamp: Date.now(),
 			};
 
-			const response = await complete(model, { messages: [userMessage] }, { apiKey, headers, signal });
+			const response = await settleWithAbort(
+				() => complete(model, { messages: [userMessage] }, { apiKey, headers, signal }),
+				signal,
+			);
 			if (response.stopReason === "aborted") {
 				throw new Error("Aborted");
 			}

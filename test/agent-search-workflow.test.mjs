@@ -7,14 +7,18 @@ import { test } from "node:test";
 import { Check } from "typebox/value";
 
 const codingAgentEntry = fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"));
+const codingAgentDir = join(dirname(codingAgentEntry), "..");
 const loaderUrl = pathToFileURL(join(dirname(codingAgentEntry), "core/extensions/loader.js"));
+const compatUrl = pathToFileURL(join(codingAgentDir, "node_modules/@earendil-works/pi-ai/dist/compat.js"));
 const { createExtensionRuntime, loadExtensionsCached } = await import(loaderUrl.href);
+const { registerApiProvider, unregisterApiProviders } = await import(compatUrl.href);
 const extensionPath = fileURLToPath(new URL("../index.ts", import.meta.url));
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 const originalBraveKey = process.env.BRAVE_API_KEY;
 const originalOpenAIKey = process.env.OPENAI_API_KEY;
 const originalFetch = globalThis.fetch;
 const activeRuntimes = new Set();
+const summaryProviderSource = "pi-web-access-agent-workflow-test";
 
 function restoreEnvironmentVariable(name, value) {
 	if (value === undefined) delete process.env[name];
@@ -24,6 +28,7 @@ function restoreEnvironmentVariable(name, value) {
 test.afterEach(async () => {
 	for (const runtime of activeRuntimes) await runtime.shutdown();
 	activeRuntimes.clear();
+	unregisterApiProviders(summaryProviderSource);
 	restoreEnvironmentVariable("PI_CODING_AGENT_DIR", originalAgentDir);
 	restoreEnvironmentVariable("BRAVE_API_KEY", originalBraveKey);
 	restoreEnvironmentVariable("OPENAI_API_KEY", originalOpenAIKey);
@@ -145,12 +150,15 @@ test("web_search defaults to non-curated execution even when UI is available", a
 	assert.equal(runtime.notifications.length, 0);
 });
 
-test("registered schema accepts legacy summary-review without advertising it", async () => {
+test("registered schema accepts supported workflows and rejects unknown modes", async () => {
 	const runtime = await loadRuntime();
 	const tool = runtime.extension.tools.get("web_search")?.definition;
 	assert.ok(tool);
 
+	assert.equal(Check(tool.parameters, { query: "raw search", workflow: "none" }), true);
+	assert.equal(Check(tool.parameters, { query: "summarized search", workflow: "auto-summary" }), true);
 	assert.equal(Check(tool.parameters, { query: "legacy search", workflow: "summary-review" }), true);
+	assert.equal(Check(tool.parameters, { query: "typo search", workflow: "auto-sumary" }), false);
 	assert.doesNotMatch(JSON.stringify(tool.parameters.properties.workflow), /summary-review/);
 });
 
@@ -256,6 +264,42 @@ test("session replacement prevents publication during summary authentication", a
 	authGate.resolve({ ok: false });
 	await new Promise((resolve) => setImmediate(resolve));
 	assert.deepEqual(runtime.entries, []);
+});
+
+test("session replacement terminates non-cooperative summary completion", async () => {
+	installSearchResponse();
+	const summaryStarted = deferred();
+	const summaryGate = deferred();
+	const summaryModel = {
+		provider: "openai-codex",
+		id: "gpt-5.3-codex-spark",
+		name: "Non-cooperative summary model",
+		api: "non-cooperative-summary-test",
+	};
+	registerApiProvider({
+		api: summaryModel.api,
+		stream() {
+			summaryStarted.resolve();
+			return { result: () => summaryGate.promise };
+		},
+	}, summaryProviderSource);
+	const runtime = await loadRuntime({}, {
+		getAvailable: () => [summaryModel],
+		find: (provider, id) => provider === summaryModel.provider && id === summaryModel.id ? summaryModel : undefined,
+		getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "summary-test-key" }),
+	});
+	const execution = executeSearch(runtime, { query: "cancel summary completion", provider: "brave", workflow: "auto-summary" });
+	try {
+		await settlesWithin(summaryStarted.promise, "summary completion start");
+		for (const handler of runtime.extension.handlers.get("session_tree") ?? []) await handler({}, runtime.context);
+		const result = await settlesWithin(execution, "summary completion cancellation");
+		assert.equal(result.details.cancelled, true);
+		assert.equal(result.details.cancelReason, "session-changed");
+		assert.deepEqual(runtime.entries, []);
+	} finally {
+		summaryGate.resolve({ stopReason: "stop", content: [] });
+		await settlesWithin(execution.catch(() => {}), "summary test cleanup");
+	}
 });
 
 test("/websearch explicitly starts the curator", async () => {

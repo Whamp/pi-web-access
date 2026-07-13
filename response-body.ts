@@ -24,6 +24,11 @@ export async function readResponseBytes(response: Response, signal?: AbortSignal
 	signal?.addEventListener("abort", onAbort, { once: true });
 
 	try {
+		if (signal?.aborted) {
+			await cancel(abortReason(signal)).catch(() => {});
+			throw abortReason(signal);
+		}
+
 		const chunks: Uint8Array[] = [];
 		let size = 0;
 		while (true) {

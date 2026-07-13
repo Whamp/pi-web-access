@@ -7,7 +7,11 @@ export function abortReason(signal: AbortSignal): unknown {
  * Both promise branches remain observed so a late settlement cannot resume work or
  * become an unhandled rejection.
  */
-export function settleWithAbort<T>(start: () => PromiseLike<T>, signal?: AbortSignal | null): Promise<T> {
+export function settleWithAbort<T>(
+	start: () => PromiseLike<T>,
+	signal?: AbortSignal | null,
+	onLateResolve?: (value: T) => void | PromiseLike<void>,
+): Promise<T> {
 	if (signal?.aborted) return Promise.reject(abortReason(signal));
 
 	let operation: PromiseLike<T>;
@@ -17,9 +21,12 @@ export function settleWithAbort<T>(start: () => PromiseLike<T>, signal?: AbortSi
 		return Promise.reject(error);
 	}
 	const observed = Promise.resolve(operation);
+	const disposeLate = (value: T): void => {
+		if (onLateResolve) void Promise.resolve(onLateResolve(value)).catch(() => {});
+	};
 	if (!signal) return observed;
 	if (signal.aborted) {
-		void observed.catch(() => {});
+		observed.then(disposeLate, () => {});
 		return Promise.reject(abortReason(signal));
 	}
 
@@ -35,7 +42,10 @@ export function settleWithAbort<T>(start: () => PromiseLike<T>, signal?: AbortSi
 
 		observed.then(
 			(value) => {
-				if (settled) return;
+				if (settled) {
+					disposeLate(value);
+					return;
+				}
 				settled = true;
 				signal.removeEventListener("abort", onAbort);
 				resolve(value);

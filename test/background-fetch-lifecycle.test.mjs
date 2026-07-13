@@ -303,6 +303,60 @@ test("caller cancellation terminally abandons a non-settling content step", asyn
 	await assertNoLateEffects(runtime, updates, () => slowFetch.resolve(jinaResponse("http://127.0.0.1/slow", "Slow")), () => requestsAfterCancellation);
 });
 
+test("caller cancellation settles while content is queued behind unrelated retrievals", async () => {
+	const runtime = await createRuntime("caller-cancel-queued-content");
+	const blockerControllers = Array.from({ length: 3 }, () => new AbortController());
+	const blockerGates = Array.from({ length: 3 }, () => deferred());
+	const blockerStarted = Array.from({ length: 3 }, () => deferred());
+	let searchCount = 0;
+	globalThis.fetch = async (url) => {
+		const requestUrl = String(url);
+		if (requestUrl.startsWith("https://api.search.brave.com/res/v1/web/search")) {
+			const index = searchCount++;
+			return braveSearchResponse([`http://127.0.0.1/content-${index}`]);
+		}
+		const match = requestUrl.match(/^http:\/\/127\.0\.0\.1\/content-(\d+)$/);
+		if (match) {
+			const index = Number(match[1]);
+			if (index < blockerStarted.length) {
+				blockerStarted[index].resolve();
+				return blockerGates[index].promise;
+			}
+			throw new Error("queued content should not start after caller cancellation");
+		}
+		throw new Error(`Unexpected fetch: ${requestUrl}`);
+	};
+
+	const blockers = blockerControllers.map((controller, index) => tool(runtime.extension, "web_search").execute(
+		`queued-blocker-${index}`,
+		{ query: `queued blocker ${index}`, provider: "brave", workflow: "none", includeContent: true },
+		controller.signal,
+		undefined,
+		runtime.context,
+	));
+	await Promise.all(blockerStarted.map(({ promise }) => promise));
+
+	const queuedController = new AbortController();
+	const callerReason = new Error("cancel queued content");
+	const queuedExecution = tool(runtime.extension, "web_search").execute(
+		"queued-cancel-search",
+		{ query: "queued cancellation", provider: "brave", workflow: "none", includeContent: true },
+		queuedController.signal,
+		undefined,
+		runtime.context,
+	);
+	try {
+		await new Promise((resolve) => setImmediate(resolve));
+		queuedController.abort(callerReason);
+		await assert.rejects(settlesWithin(queuedExecution, "queued content cancellation"), (error) => error === callerReason);
+		assert.deepEqual(runtime.entries, []);
+	} finally {
+		for (const controller of blockerControllers) controller.abort(new Error("release queued blocker"));
+		for (const gate of blockerGates) gate.resolve(new Response("released", { status: 200 }));
+		await Promise.allSettled([...blockers, queuedExecution]);
+	}
+});
+
 test("caller cancellation closes a direct HTTP body before tool settlement", async () => {
 	const runtime = await createRuntime("caller-cancel-body");
 	const controller = new AbortController();
@@ -346,6 +400,56 @@ test("caller cancellation closes a direct HTTP body before tool settlement", asy
 	await assert.rejects(settlesWithin(execution, "direct body caller cancellation"), (error) => error === callerReason);
 	assert.equal(bodyCancelled, true, "the response body must close before web_search settles");
 	await assertNoLateEffects(runtime, updates, () => {}, () => requestsAfterCancellation);
+});
+
+test("caller cancellation already fired before body reading still closes the body", async () => {
+	const runtime = await createRuntime("caller-cancel-before-body-reader");
+	const controller = new AbortController();
+	const callerReason = new Error("caller cancelled before body reader");
+	const releaseBody = deferred();
+	let bodyCancelled = false;
+	globalThis.fetch = async (url) => {
+		const requestUrl = String(url);
+		if (requestUrl.startsWith("https://api.search.brave.com/res/v1/web/search")) {
+			return braveSearchResponse(["http://127.0.0.1/direct"]);
+		}
+		if (requestUrl === "http://127.0.0.1/direct") {
+			const body = new ReadableStream({
+				async pull(streamController) {
+					await releaseBody.promise;
+					streamController.close();
+				},
+				cancel() {
+					bodyCancelled = true;
+				},
+			});
+			const response = new Response(body, { status: 200, headers: { "content-type": "text/plain" } });
+			Object.defineProperty(response, "body", {
+				get() {
+					controller.abort(callerReason);
+					return body;
+				},
+			});
+			return response;
+		}
+		throw new Error(`Unexpected fetch: ${requestUrl}`);
+	};
+
+	const execution = tool(runtime.extension, "web_search").execute(
+		"cancel-before-body-reader-search",
+		{ query: "cancel before body reader", provider: "brave", workflow: "none", includeContent: true },
+		controller.signal,
+		undefined,
+		runtime.context,
+	);
+	try {
+		await assert.rejects(settlesWithin(execution, "pre-fired body cancellation"), (error) => error === callerReason);
+		assert.equal(bodyCancelled, true, "the response body must close before web_search settles");
+		assert.deepEqual(runtime.entries, []);
+	} finally {
+		releaseBody.resolve();
+		await settlesWithin(execution.catch(() => {}), "pre-fired body test cleanup");
+	}
 });
 
 test("fallback closes a failed direct HTTP body before tool settlement", async () => {
@@ -421,14 +525,64 @@ test("terminal content closes oversized and unsupported response bodies", async 
 	assert.deepEqual(cancelledBodies, new Set(["oversized", "unsupported"]));
 });
 
+test("caller cancellation terminates a waiter on another search's cached GitHub clone", async () => {
+	const runtime = await createRuntime("github-clone-waiter-cancel");
+	const ownerController = new AbortController();
+	const waiterController = new AbortController();
+	const waiterReason = new Error("cancel cached clone waiter");
+	const fakeBin = await mkdtemp(join(tmpdir(), "pi-web-access-fake-gh-waiter-"));
+	const pidFile = join(fakeBin, "gh.pid");
+	const ghPath = join(fakeBin, "gh");
+	await writeFile(ghPath, `#!/usr/bin/env node\nimport { writeFileSync } from "node:fs";\nif (process.argv.includes("--version")) { console.log("gh version test"); process.exit(0); }\nif (process.argv.includes("api")) { console.log("1"); process.exit(0); }\nwriteFileSync(${JSON.stringify(pidFile)}, String(process.pid));\nsetInterval(() => {}, 1000);\n`);
+	await chmod(ghPath, 0o755);
+	const originalPath = process.env.PATH;
+	process.env.PATH = `${fakeBin}:${originalPath ?? ""}`;
+	globalThis.fetch = async (url) => {
+		const requestUrl = String(url);
+		if (requestUrl.startsWith("https://api.search.brave.com/res/v1/web/search")) {
+			return braveSearchResponse(["https://github.com/example/cached-cancellation-repository"]);
+		}
+		throw new Error(`Unexpected fetch: ${requestUrl}`);
+	};
+
+	let childPid;
+	const ownerExecution = tool(runtime.extension, "web_search").execute(
+		"github-clone-owner",
+		{ query: "GitHub clone owner", provider: "brave", workflow: "none", includeContent: true },
+		ownerController.signal,
+		undefined,
+		runtime.context,
+	);
+	let waiterExecution;
+	try {
+		childPid = Number(await waitForFile(pidFile, "cached clone owner pid"));
+		waiterExecution = tool(runtime.extension, "web_search").execute(
+			"github-clone-waiter",
+			{ query: "GitHub clone waiter", provider: "brave", workflow: "none", includeContent: true },
+			waiterController.signal,
+			undefined,
+			runtime.context,
+		);
+		await new Promise((resolve) => setTimeout(resolve, 30));
+		waiterController.abort(waiterReason);
+		await assert.rejects(settlesWithin(waiterExecution, "cached clone waiter cancellation"), (error) => error === waiterReason);
+	} finally {
+		ownerController.abort(new Error("release cached clone owner"));
+		if (childPid && isProcessAlive(childPid)) process.kill(childPid, "SIGKILL");
+		process.env.PATH = originalPath;
+		await Promise.allSettled([ownerExecution, waiterExecution]);
+	}
+});
+
 test("caller cancellation terminates GitHub CLI work before tool settlement", async () => {
 	const runtime = await createRuntime("github-cli-cancel");
 	const controller = new AbortController();
 	const callerReason = new Error("cancel GitHub CLI");
 	const fakeBin = await mkdtemp(join(tmpdir(), "pi-web-access-fake-gh-"));
 	const pidFile = join(fakeBin, "gh.pid");
+	const descendantPidFile = join(fakeBin, "git.pid");
 	const ghPath = join(fakeBin, "gh");
-	await writeFile(ghPath, `#!/usr/bin/env node\nimport { writeFileSync } from "node:fs";\nif (process.argv.includes("--version")) { console.log("gh version test"); process.exit(0); }\nwriteFileSync(${JSON.stringify(pidFile)}, String(process.pid));\nsetInterval(() => {}, 1000);\n`);
+	await writeFile(ghPath, `#!/usr/bin/env node\nimport { writeFileSync } from "node:fs";\nimport { spawn } from "node:child_process";\nif (process.argv.includes("--version")) { console.log("gh version test"); process.exit(0); }\nconst descendant = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "inherit" });\nwriteFileSync(${JSON.stringify(pidFile)}, String(process.pid));\nwriteFileSync(${JSON.stringify(descendantPidFile)}, String(descendant.pid));\nsetInterval(() => {}, 1000);\n`);
 	await chmod(ghPath, 0o755);
 	const originalPath = process.env.PATH;
 	process.env.PATH = `${fakeBin}:${originalPath ?? ""}`;
@@ -444,7 +598,9 @@ test("caller cancellation terminates GitHub CLI work before tool settlement", as
 	assert.ok(activityShortcut, "activity shortcut should be registered");
 	await activityShortcut.handler(runtime.context);
 	let childPid;
+	let descendantPid;
 	let childAliveAtSettlement = false;
+	let descendantAliveAtSettlement = false;
 	let widgetUpdatesAtSettlement = 0;
 	let widgetUpdatesAfterChildExit = 0;
 	try {
@@ -456,18 +612,22 @@ test("caller cancellation terminates GitHub CLI work before tool settlement", as
 			runtime.context,
 		);
 		childPid = Number(await waitForFile(pidFile, "fake gh pid"));
+		descendantPid = Number(await waitForFile(descendantPidFile, "fake git descendant pid"));
 		controller.abort(callerReason);
 		await assert.rejects(settlesWithin(execution, "GitHub CLI cancellation"), (error) => error === callerReason);
 		childAliveAtSettlement = isProcessAlive(childPid);
+		descendantAliveAtSettlement = isProcessAlive(descendantPid);
 		widgetUpdatesAtSettlement = runtime.widgetUpdates.length;
 	} finally {
 		if (childPid && isProcessAlive(childPid)) process.kill(childPid, "SIGKILL");
+		if (descendantPid && isProcessAlive(descendantPid)) process.kill(descendantPid, "SIGKILL");
 		process.env.PATH = originalPath;
 		await new Promise((resolve) => setTimeout(resolve, 50));
 		widgetUpdatesAfterChildExit = runtime.widgetUpdates.length;
 	}
 
 	assert.equal(childAliveAtSettlement, false, "GitHub CLI process must exit before web_search settles");
+	assert.equal(descendantAliveAtSettlement, false, "GitHub CLI descendants must exit before web_search settles");
 	assert.equal(widgetUpdatesAfterChildExit, widgetUpdatesAtSettlement, "GitHub cleanup must not update the widget after settlement");
 });
 
