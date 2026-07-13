@@ -709,7 +709,7 @@ export async function fetchAllContent(
 	return Promise.all(urls.map((url) => fetchLimit(async () => {
 		if (signal?.aborted) return abortedResult(url);
 		try {
-			return await settleWithAbort(() => extractContent(url, signal, options), signal);
+			return await extractContent(url, signal, options);
 		} catch (error) {
 			if (signal?.aborted) return abortedResult(url);
 			throw error;

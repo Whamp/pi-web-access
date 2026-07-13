@@ -1,5 +1,6 @@
 import { complete, type Message, type Model } from "@earendil-works/pi-ai/compat";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { settleWithAbort } from "./abort.ts";
 import { loadEnabledModelPatterns, modelMatchesEnabledPatterns } from "./summary-model-scope.ts";
 import type { QueryResultData } from "./storage.ts";
 
@@ -192,6 +193,7 @@ function parseModelSelector(value: string): { provider: string; id: string } {
 async function resolveSummaryModelCandidates(
 	ctx: SummaryGenerationContext,
 	modelOverride?: string,
+	signal?: AbortSignal,
 ): Promise<{ candidates: Array<{ model: Model; apiKey: string; headers?: Record<string, string> }>; errors: string[] }> {
 	const enabledModelPatterns = loadEnabledModelPatterns(ctx);
 	const specs: Array<{ provider: string; id: string }> = [];
@@ -216,7 +218,7 @@ async function resolveSummaryModelCandidates(
 			errors.push(`Summary model is not enabled: ${value}`);
 			continue;
 		}
-		const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+		const auth = await settleWithAbort(() => ctx.modelRegistry.getApiKeyAndHeaders(model), signal);
 		if (!auth.ok || !auth.apiKey) {
 			errors.push(`No API key available for summary model ${value}`);
 			continue;
@@ -272,8 +274,10 @@ export async function generateSummaryDraft(
 	const prompt = buildSummaryPrompt(results, feedback);
 	let resolved: Awaited<ReturnType<typeof resolveSummaryModelCandidates>>;
 	try {
-		resolved = await resolveSummaryModelCandidates(ctx, modelOverride);
+		resolved = await resolveSummaryModelCandidates(ctx, modelOverride, signal);
 	} catch (err) {
+		signal?.throwIfAborted();
+		if (isAbortError(err)) throw err;
 		const message = err instanceof Error ? err.message : String(err);
 		return buildFallbackSummary(results, `summary-model-settings-error: ${message}`);
 	}
@@ -322,5 +326,6 @@ export async function generateSummaryDraft(
 		}
 	}
 
+	signal?.throwIfAborted();
 	return buildFallbackSummary(results, lastError ? `summary-model-unavailable: ${lastError}` : "summary-model-unavailable");
 }

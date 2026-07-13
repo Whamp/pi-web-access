@@ -5,16 +5,6 @@ import { fetchRemoteUrl, validateRemoteUrl } from "../ssrf-protection.ts";
 
 const publicLookup = async () => [{ address: "93.184.216.34", family: 4 }];
 
-function deferred() {
-	let resolve;
-	let reject;
-	const promise = new Promise((resolvePromise, rejectPromise) => {
-		resolve = resolvePromise;
-		reject = rejectPromise;
-	});
-	return { promise, resolve, reject };
-}
-
 async function settlesWithin(promise, label) {
 	let timeoutId;
 	try {
@@ -80,26 +70,26 @@ test("validateRemoteUrl permits public HTTP and HTTPS targets", async () => {
 	assert.equal((await validateRemoteUrl("https://[2606:2800:220:1:248:1893:25c8:1946]/")).hostname, "[2606:2800:220:1:248:1893:25c8:1946]");
 });
 
-test("validateRemoteUrl abandons a non-settling DNS lookup on cancellation", async () => {
-	const lookupGate = deferred();
+test("validateRemoteUrl waits for DNS cleanup on cancellation", async () => {
 	const controller = new AbortController();
 	const reason = new DOMException("cancelled", "AbortError");
+	let cleanupComplete = false;
 	const validation = validateRemoteUrl("https://example.test/", {
-		lookup: () => lookupGate.promise,
+		lookup: (_hostname, options) => new Promise((_resolve, reject) => {
+			options?.signal?.addEventListener("abort", () => {
+				setImmediate(() => {
+					cleanupComplete = true;
+					reject(options.signal.reason);
+				});
+			}, { once: true });
+		}),
 		signal: controller.signal,
 	});
 	controller.abort(reason);
 	await assert.rejects(settlesWithin(validation, "DNS cancellation"), (error) => error === reason);
-	const unhandled = [];
-	const onUnhandled = (error) => unhandled.push(error);
-	process.on("unhandledRejection", onUnhandled);
-	try {
-		lookupGate.reject(new Error("late DNS failure"));
-		await new Promise((resolve) => setImmediate(resolve));
-	} finally {
-		process.removeListener("unhandledRejection", onUnhandled);
-	}
-	assert.deepEqual(unhandled, []);
+	const cleanupCompleteAtSettlement = cleanupComplete;
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(cleanupCompleteAtSettlement, true, "DNS cleanup must finish before validation settles");
 });
 
 test("fetchRemoteUrl validates redirect targets before following", async () => {

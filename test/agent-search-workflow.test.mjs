@@ -12,6 +12,7 @@ const { createExtensionRuntime, loadExtensionsCached } = await import(loaderUrl.
 const extensionPath = fileURLToPath(new URL("../index.ts", import.meta.url));
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 const originalBraveKey = process.env.BRAVE_API_KEY;
+const originalOpenAIKey = process.env.OPENAI_API_KEY;
 const originalFetch = globalThis.fetch;
 const activeRuntimes = new Set();
 
@@ -25,20 +26,53 @@ test.afterEach(async () => {
 	activeRuntimes.clear();
 	restoreEnvironmentVariable("PI_CODING_AGENT_DIR", originalAgentDir);
 	restoreEnvironmentVariable("BRAVE_API_KEY", originalBraveKey);
+	restoreEnvironmentVariable("OPENAI_API_KEY", originalOpenAIKey);
 	globalThis.fetch = originalFetch;
 });
 
-async function loadRuntime(config = {}) {
+function deferred() {
+	let resolve;
+	let reject;
+	const promise = new Promise((resolvePromise, rejectPromise) => {
+		resolve = resolvePromise;
+		reject = rejectPromise;
+	});
+	return { promise, resolve, reject };
+}
+
+async function settlesWithin(promise, label) {
+	let timeoutId;
+	try {
+		return await Promise.race([
+			promise,
+			new Promise((_resolve, reject) => {
+				timeoutId = setTimeout(() => reject(new Error(`${label} did not settle promptly`)), 100);
+			}),
+		]);
+	} finally {
+		clearTimeout(timeoutId);
+	}
+}
+
+const unavailableModelRegistry = {
+	getAvailable: () => [],
+	find: () => undefined,
+	getApiKeyAndHeaders: async () => ({ ok: false }),
+};
+
+async function loadRuntime(config = {}, modelRegistry = unavailableModelRegistry) {
 	const configDir = await mkdtemp(join(tmpdir(), "pi-web-access-agent-workflow-"));
 	await writeFile(join(configDir, "web-search.json"), JSON.stringify(config));
 	process.env.PI_CODING_AGENT_DIR = configDir;
 	process.env.BRAVE_API_KEY = "brave-test-key";
+	delete process.env.OPENAI_API_KEY;
 
 	const runtime = createExtensionRuntime();
 	const notifications = [];
 	const sent = [];
+	const entries = [];
 	runtime.sendMessage = (message, options) => sent.push({ message, options });
-	runtime.appendEntry = () => {};
+	runtime.appendEntry = (customType, data) => entries.push({ customType, data });
 	runtime.refreshTools = () => {};
 	runtime.getActiveTools = () => [];
 	runtime.getAllTools = () => [];
@@ -60,11 +94,7 @@ async function loadRuntime(config = {}) {
 		mode: "interactive",
 		cwd: configDir,
 		model: undefined,
-		modelRegistry: {
-			getAvailable: () => [],
-			find: () => undefined,
-			getApiKeyAndHeaders: async () => ({ ok: false }),
-		},
+		modelRegistry,
 		isProjectTrusted: () => true,
 		sessionManager: { getBranch: () => [] },
 		ui: { setWidget() {}, notify(message, level) { notifications.push({ message, level }); } },
@@ -74,6 +104,7 @@ async function loadRuntime(config = {}) {
 		context,
 		notifications,
 		sent,
+		entries,
 		async shutdown() {
 			for (const handler of extension.handlers.get("session_shutdown") ?? []) await handler({}, context);
 			activeRuntimes.delete(loadedRuntime);
@@ -151,6 +182,58 @@ test("auto-summary completes before web_search returns", async () => {
 	assert.equal(result.details.summary.workflow, "auto-summary");
 	assert.match(result.content[0].text, /Sources/);
 	assert.match(result.content[0].text, /https:\/\/example\.com\/article/);
+});
+
+test("session replacement terminates provider authentication", async () => {
+	const authStarted = deferred();
+	const authGate = deferred();
+	const runtime = await loadRuntime({}, {
+		getAvailable: () => [],
+		find: () => undefined,
+		getApiKeyAndHeaders: async () => {
+			authStarted.resolve();
+			return authGate.promise;
+		},
+	});
+	const execution = executeSearch(runtime, { query: "cancel provider auth", provider: "openai", workflow: "none" });
+	await authStarted.promise;
+
+	for (const handler of runtime.extension.handlers.get("session_tree") ?? []) await handler({}, runtime.context);
+	const result = await settlesWithin(execution, "provider authentication cancellation");
+	assert.equal(result.details.cancelled, true);
+	assert.equal(result.details.cancelReason, "session-changed");
+	assert.deepEqual(runtime.entries, []);
+
+	authGate.resolve({ ok: false });
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.deepEqual(runtime.entries, []);
+});
+
+test("session replacement prevents publication during summary authentication", async () => {
+	installSearchResponse();
+	const authStarted = deferred();
+	const authGate = deferred();
+	const summaryModel = { provider: "openai-codex", id: "gpt-5.3-codex-spark", name: "Summary model" };
+	const runtime = await loadRuntime({}, {
+		getAvailable: () => [summaryModel],
+		find: (provider, id) => provider === summaryModel.provider && id === summaryModel.id ? summaryModel : undefined,
+		getApiKeyAndHeaders: async () => {
+			authStarted.resolve();
+			return authGate.promise;
+		},
+	});
+	const execution = executeSearch(runtime, { query: "cancel summary auth", provider: "brave", workflow: "auto-summary" });
+	await authStarted.promise;
+
+	for (const handler of runtime.extension.handlers.get("session_tree") ?? []) await handler({}, runtime.context);
+	const result = await settlesWithin(execution, "summary authentication cancellation");
+	assert.equal(result.details.cancelled, true);
+	assert.equal(result.details.cancelReason, "session-changed");
+	assert.deepEqual(runtime.entries, []);
+
+	authGate.resolve({ ok: false });
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.deepEqual(runtime.entries, []);
 });
 
 test("/websearch explicitly starts the curator", async () => {

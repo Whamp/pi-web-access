@@ -2,7 +2,6 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Box, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { StringEnum, complete, type Model } from "@earendil-works/pi-ai/compat";
-import { settleWithAbort } from "./abort.ts";
 import { fetchAllContent, type ExtractedContent } from "./extract.ts";
 import { normalizeFetchContentParams } from "./fetch-params.ts";
 import { clearCloneCache } from "./github-extract.ts";
@@ -614,7 +613,7 @@ export default function (pi: ExtensionAPI) {
 			await Promise.all(missing.map(async ([key, url]) => {
 				let item: ExtractedContent | undefined;
 				try {
-					[item] = await settleWithAbort(() => fetchAllContent([url], contentSignal), contentSignal);
+					[item] = await fetchAllContent([url], contentSignal);
 				} catch (error) {
 					if (executionSignal.aborted) throw executionSignal.reason;
 					if (!deadlineSignal.aborted) throw error;
@@ -1375,9 +1374,11 @@ export default function (pi: ExtensionAPI) {
 				summaryMeta = generated.meta;
 			}
 
+			executionSignal.throwIfAborted();
 			const terminalContent = params.includeContent
 				? await retrieveTerminalContent(allUrls, allInlineContent, executionSignal, onUpdate)
 				: undefined;
+			executionSignal.throwIfAborted();
 			const searchReturn = buildSearchReturn({
 				queryList,
 				results: searchResults,

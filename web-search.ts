@@ -1,3 +1,4 @@
+import { settleWithAbort } from "./abort.ts";
 import { braveSearchProvider } from "./brave.ts";
 import { exaSearchProvider } from "./exa.ts";
 import { geminiSearchProvider } from "./gemini-search.ts";
@@ -101,7 +102,10 @@ export function createWebSearch(providers: SearchProviders): WebSearch {
 				const selected = providers[provider];
 				let eligibility: ProviderEligibility;
 				try {
-					eligibility = await selected.eligibility({ extensionContext: options.extensionContext });
+					eligibility = await settleWithAbort(
+						() => selected.eligibility({ extensionContext: options.extensionContext }),
+						options.signal,
+					);
 				} catch (error) {
 					throwIfCallerCancelled(options.signal);
 					throw error;
@@ -112,7 +116,7 @@ export function createWebSearch(providers: SearchProviders): WebSearch {
 				}
 
 				try {
-					const response = await selected.search({ query, options });
+					const response = await settleWithAbort(() => selected.search({ query, options }), options.signal);
 					throwIfCallerCancelled(options.signal);
 					return { ...response, provider };
 				} catch (error) {
@@ -128,7 +132,10 @@ export function createWebSearch(providers: SearchProviders): WebSearch {
 				const candidate = providers[providerName];
 				let eligibility: ProviderEligibility;
 				try {
-					eligibility = await candidate.eligibility({ extensionContext: options.extensionContext });
+					eligibility = await settleWithAbort(
+						() => candidate.eligibility({ extensionContext: options.extensionContext }),
+						options.signal,
+					);
 				} catch (error) {
 					throwIfCallerCancelled(options.signal);
 					failures.push({ provider: providerName, label: candidate.label, error });
@@ -137,7 +144,7 @@ export function createWebSearch(providers: SearchProviders): WebSearch {
 				throwIfCallerCancelled(options.signal);
 				if (!eligibility.eligible) continue;
 				try {
-					const response = await candidate.search({ query, options });
+					const response = await settleWithAbort(() => candidate.search({ query, options }), options.signal);
 					throwIfCallerCancelled(options.signal);
 					if (response) return { ...response, provider: providerName };
 					failures.push({

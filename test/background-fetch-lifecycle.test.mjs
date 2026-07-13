@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -31,6 +31,26 @@ async function settlesWithin(promise, label) {
 		]);
 	} finally {
 		clearTimeout(timeoutId);
+	}
+}
+
+async function waitForFile(path, label) {
+	for (let attempt = 0; attempt < 100; attempt++) {
+		try {
+			return await readFile(path, "utf8");
+		} catch {
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+	}
+	throw new Error(`${label} was not created`);
+}
+
+function isProcessAlive(pid) {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch {
+		return false;
 	}
 }
 
@@ -323,6 +343,56 @@ test("caller cancellation terminally abandons a non-settling direct HTTP body", 
 	controller.abort(callerReason);
 	await assert.rejects(settlesWithin(execution, "direct body caller cancellation"), (error) => error === callerReason);
 	await assertNoLateEffects(runtime, updates, () => bodyGate.resolve("late body"), () => requestsAfterCancellation);
+});
+
+test("caller cancellation terminates GitHub CLI work before tool settlement", async () => {
+	const runtime = await createRuntime("github-cli-cancel");
+	const controller = new AbortController();
+	const callerReason = new Error("cancel GitHub CLI");
+	const fakeBin = await mkdtemp(join(tmpdir(), "pi-web-access-fake-gh-"));
+	const pidFile = join(fakeBin, "gh.pid");
+	const ghPath = join(fakeBin, "gh");
+	await writeFile(ghPath, `#!/usr/bin/env node\nimport { writeFileSync } from "node:fs";\nif (process.argv.includes("--version")) { console.log("gh version test"); process.exit(0); }\nwriteFileSync(${JSON.stringify(pidFile)}, String(process.pid));\nsetInterval(() => {}, 1000);\n`);
+	await chmod(ghPath, 0o755);
+	const originalPath = process.env.PATH;
+	process.env.PATH = `${fakeBin}:${originalPath ?? ""}`;
+	globalThis.fetch = async (url) => {
+		const requestUrl = String(url);
+		if (requestUrl.startsWith("https://api.search.brave.com/res/v1/web/search")) {
+			return braveSearchResponse(["https://github.com/example/slow-repository"]);
+		}
+		throw new Error(`Unexpected fetch: ${requestUrl}`);
+	};
+
+	const activityShortcut = runtime.extension.shortcuts.get("ctrl+shift+w");
+	assert.ok(activityShortcut, "activity shortcut should be registered");
+	await activityShortcut.handler(runtime.context);
+	let childPid;
+	let childAliveAtSettlement = false;
+	let widgetUpdatesAtSettlement = 0;
+	let widgetUpdatesAfterChildExit = 0;
+	try {
+		const execution = tool(runtime.extension, "web_search").execute(
+			"github-cli-cancel-search",
+			{ query: "GitHub repository", provider: "brave", workflow: "none", includeContent: true },
+			controller.signal,
+			undefined,
+			runtime.context,
+		);
+		childPid = Number(await waitForFile(pidFile, "fake gh pid"));
+		controller.abort(callerReason);
+		await assert.rejects(settlesWithin(execution, "GitHub CLI cancellation"), (error) => error === callerReason);
+		childAliveAtSettlement = isProcessAlive(childPid);
+		widgetUpdatesAtSettlement = runtime.widgetUpdates.length;
+	} finally {
+		if (childPid && isProcessAlive(childPid)) process.kill(childPid, "SIGKILL");
+		process.env.PATH = originalPath;
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		widgetUpdatesAfterChildExit = runtime.widgetUpdates.length;
+	}
+
+	assert.equal(childAliveAtSettlement, false, "GitHub CLI process must exit before web_search settles");
+	assert.equal(widgetUpdatesAfterChildExit, widgetUpdatesAtSettlement, "GitHub cleanup must not update the widget after settlement");
 });
 
 test("session replacement terminally abandons a non-settling content step", async () => {

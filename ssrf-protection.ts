@@ -1,4 +1,4 @@
-import { lookup as dnsLookup } from "node:dns/promises";
+import { Resolver } from "node:dns/promises";
 import net from "node:net";
 
 import { abortReason, settleWithAbort } from "./abort.ts";
@@ -33,8 +33,35 @@ interface FetchRemoteOptions extends ValidationOptions {
 	maxRedirects?: number;
 }
 
-async function defaultLookup(hostname: string): Promise<LookupAddress[]> {
-	return dnsLookup(hostname, { all: true, verbatim: true });
+async function defaultLookup(hostname: string, options: { signal?: AbortSignal } = {}): Promise<LookupAddress[]> {
+	options.signal?.throwIfAborted();
+	const resolver = new Resolver();
+	const onAbort = (): void => resolver.cancel();
+	options.signal?.addEventListener("abort", onAbort, { once: true });
+	try {
+		const [ipv4Result, ipv6Result] = await Promise.allSettled([
+			resolver.resolve4(hostname),
+			resolver.resolve6(hostname),
+		]);
+		options.signal?.throwIfAborted();
+
+		const addresses: LookupAddress[] = [];
+		let firstError: unknown;
+		if (ipv4Result.status === "fulfilled") {
+			addresses.push(...ipv4Result.value.map(address => ({ address, family: 4 })));
+		} else {
+			firstError = ipv4Result.reason;
+		}
+		if (ipv6Result.status === "fulfilled") {
+			addresses.push(...ipv6Result.value.map(address => ({ address, family: 6 })));
+		} else if (firstError === undefined) {
+			firstError = ipv6Result.reason;
+		}
+		if (addresses.length === 0 && firstError !== undefined) throw firstError;
+		return addresses;
+	} finally {
+		options.signal?.removeEventListener("abort", onAbort);
+	}
 }
 
 export async function validateRemoteUrl(rawUrl: string | URL, options: ValidationOptions = {}): Promise<URL> {
@@ -59,7 +86,7 @@ export async function validateRemoteUrl(rawUrl: string | URL, options: Validatio
 	let addresses: LookupAddress[];
 	try {
 		const lookup = options.lookup ?? defaultLookup;
-		addresses = await settleWithAbort(() => lookup(hostname, { signal: options.signal }), options.signal);
+		addresses = await lookup(hostname, { signal: options.signal });
 	} catch (err) {
 		if (options.signal?.aborted) throw abortReason(options.signal);
 		const message = err instanceof Error ? err.message : String(err);
