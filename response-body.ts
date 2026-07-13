@@ -1,8 +1,55 @@
-import { abortReason } from "./abort.ts";
+import { abortReason, settleWithAbort } from "./abort.ts";
 
-export async function discardResponseBody(response: Response, reason = "Response body was not consumed"): Promise<void> {
-	if (!response.body || response.body.locked) return;
-	await response.body.cancel(reason);
+const DISPOSAL_GRACE_MS = 100;
+
+/** Await ordinary response cleanup, but never let a broken stream own settlement forever. */
+export async function discardResponseBody(
+	response: Response,
+	reason = "Response body was not consumed",
+	signal?: AbortSignal,
+): Promise<void> {
+	const body = response.body;
+	if (!body || body.locked) return;
+
+	let cancellation: Promise<void>;
+	try {
+		cancellation = body.cancel(reason);
+	} catch (error) {
+		throw error;
+	}
+	void cancellation.catch(() => {});
+
+	const graceSignal = AbortSignal.timeout(DISPOSAL_GRACE_MS);
+	const disposalSignal = signal ? AbortSignal.any([signal, graceSignal]) : graceSignal;
+	try {
+		await settleWithAbort(() => cancellation, disposalSignal);
+	} catch (error) {
+		if (signal?.aborted) throw abortReason(signal);
+		if (graceSignal.aborted) return;
+		throw error;
+	}
+}
+
+/** Start cleanup for a response that arrived after its owner settled; never await it. */
+export function abandonResponseBody(response: Response, reason = "Response body was abandoned"): void {
+	const body = response.body;
+	if (!body || body.locked) return;
+	try {
+		void body.cancel(reason).catch(() => {});
+	} catch {
+	}
+}
+
+export function fetchOwnedResponse(
+	input: RequestInfo | URL,
+	init: RequestInit,
+	signal: AbortSignal,
+): Promise<Response> {
+	return settleWithAbort(
+		() => fetch(input, { ...init, signal }),
+		signal,
+		lateResponse => abandonResponseBody(lateResponse, "Response arrived after its owner settled"),
+	);
 }
 
 export async function readResponseBytes(response: Response, signal?: AbortSignal): Promise<Uint8Array> {
@@ -25,7 +72,7 @@ export async function readResponseBytes(response: Response, signal?: AbortSignal
 
 	try {
 		if (signal?.aborted) {
-			await cancel(abortReason(signal)).catch(() => {});
+			void cancel(abortReason(signal)).catch(() => {});
 			throw abortReason(signal);
 		}
 
@@ -48,13 +95,17 @@ export async function readResponseBytes(response: Response, signal?: AbortSignal
 		return bytes;
 	} catch (error) {
 		if (signal?.aborted) {
-			await cancel(abortReason(signal)).catch(() => {});
+			void cancel(abortReason(signal)).catch(() => {});
 			throw abortReason(signal);
 		}
-		await cancel(error).catch(() => {});
+		void cancel(error).catch(() => {});
 		throw error;
 	} finally {
 		signal?.removeEventListener("abort", onAbort);
 		reader.releaseLock();
 	}
+}
+
+export async function readResponseText(response: Response, signal?: AbortSignal): Promise<string> {
+	return new TextDecoder().decode(await readResponseBytes(response, signal));
 }

@@ -1,8 +1,8 @@
-import { Resolver } from "node:dns/promises";
+import { lookup as dnsLookup } from "node:dns/promises";
 import net from "node:net";
 
 import { abortReason, settleWithAbort } from "./abort.ts";
-import { discardResponseBody } from "./response-body.ts";
+import { abandonResponseBody, discardResponseBody } from "./response-body.ts";
 
 const DEFAULT_MAX_REDIRECTS = 5;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
@@ -35,34 +35,10 @@ interface FetchRemoteOptions extends ValidationOptions {
 }
 
 async function defaultLookup(hostname: string, options: { signal?: AbortSignal } = {}): Promise<LookupAddress[]> {
-	options.signal?.throwIfAborted();
-	const resolver = new Resolver();
-	const onAbort = (): void => resolver.cancel();
-	options.signal?.addEventListener("abort", onAbort, { once: true });
-	try {
-		const [ipv4Result, ipv6Result] = await Promise.allSettled([
-			resolver.resolve4(hostname),
-			resolver.resolve6(hostname),
-		]);
-		options.signal?.throwIfAborted();
-
-		const addresses: LookupAddress[] = [];
-		let firstError: unknown;
-		if (ipv4Result.status === "fulfilled") {
-			addresses.push(...ipv4Result.value.map(address => ({ address, family: 4 })));
-		} else {
-			firstError = ipv4Result.reason;
-		}
-		if (ipv6Result.status === "fulfilled") {
-			addresses.push(...ipv6Result.value.map(address => ({ address, family: 6 })));
-		} else if (firstError === undefined) {
-			firstError = ipv6Result.reason;
-		}
-		if (addresses.length === 0 && firstError !== undefined) throw firstError;
-		return addresses;
-	} finally {
-		options.signal?.removeEventListener("abort", onAbort);
-	}
+	return settleWithAbort(
+		() => dnsLookup(hostname, { all: true, verbatim: true }),
+		options.signal,
+	);
 }
 
 export async function validateRemoteUrl(rawUrl: string | URL, options: ValidationOptions = {}): Promise<URL> {
@@ -115,18 +91,18 @@ export async function fetchRemoteUrl(
 		const response = await settleWithAbort(
 			() => fetchImpl(current, { ...requestInit, redirect: "manual" }),
 			requestInit.signal,
-			lateResponse => discardResponseBody(lateResponse, "Response arrived after request cancellation"),
+			lateResponse => abandonResponseBody(lateResponse, "Response arrived after request cancellation"),
 		);
 		if (!REDIRECT_STATUSES.has(response.status)) return response;
 
 		const location = response.headers.get("location");
 		if (!location) return response;
 		if (redirects === maxRedirects) {
-			await discardResponseBody(response, "Redirect limit reached");
+			await discardResponseBody(response, "Redirect limit reached", requestInit.signal ?? undefined);
 			throw new Error(`Too many redirects fetching ${current.toString()}`);
 		}
 
-		await discardResponseBody(response, "Following redirect");
+		await discardResponseBody(response, "Following redirect", requestInit.signal ?? undefined);
 		current = await validateRemoteUrl(new URL(location, current), { ...options, signal: requestInit.signal ?? undefined });
 		if (response.status === 303 || ((response.status === 301 || response.status === 302) && requestInit.method?.toUpperCase() === "POST")) {
 			const { body: _body, ...nextInit } = requestInit;

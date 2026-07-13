@@ -1,9 +1,9 @@
 import { Readability } from "@mozilla/readability";
 import { parseHTML } from "linkedom";
 import TurndownService from "turndown";
-import pLimit from "p-limit";
 import { activityMonitor } from "./activity.ts";
-import { abortReason, settleWithAbort } from "./abort.ts";
+import { settleWithAbort } from "./abort.ts";
+import { createAbortableLimiter } from "./abortable-limit.ts";
 import { extractRSCContent } from "./rsc-extract.ts";
 import { extractPDFToMarkdown, isPDF } from "./pdf-extract.ts";
 import { extractGitHub } from "./github-extract.ts";
@@ -14,7 +14,7 @@ import { isVideoFile, extractVideo, extractVideoFrame, getLocalVideoDuration } f
 import { existsSync, readFileSync } from "node:fs";
 import { fetchRemoteUrl, validateRemoteUrl, type Lookup } from "./ssrf-protection.ts";
 import { formatSeconds, getWebSearchConfigPath } from "./utils.ts";
-import { discardResponseBody, readResponseBytes } from "./response-body.ts";
+import { discardResponseBody, fetchOwnedResponse, readResponseBytes, readResponseText } from "./response-body.ts";
 
 const DEFAULT_TIMEOUT_MS = 30000;
 const CONCURRENT_LIMIT = 3;
@@ -77,7 +77,7 @@ const turndown = new TurndownService({
 	codeBlockStyle: "fenced",
 });
 
-const fetchLimit = pLimit(CONCURRENT_LIMIT);
+const fetchLimit = createAbortableLimiter(CONCURRENT_LIMIT);
 
 export interface VideoFrame {
 	data: string;
@@ -127,20 +127,20 @@ async function extractWithJinaReader(
 			...(signal ? [signal] : []),
 		]);
 		await validateRemoteUrl(url, { allowRanges: loadSsrfAllowRanges(), lookup, signal: requestSignal });
-		const res = await settleWithAbort(() => fetch(jinaUrl, {
+		const res = await fetchOwnedResponse(jinaUrl, {
 			headers: {
 				"Accept": "text/markdown",
 				"X-No-Cache": "true",
 			},
-			signal: requestSignal,
-		}), requestSignal);
+		}, requestSignal);
 
 		if (!res.ok) {
+			await discardResponseBody(res, "Jina request failed", requestSignal);
 			activityMonitor.logComplete(activityId, res.status);
 			return null;
 		}
 
-		const content = await settleWithAbort(() => res.text(), requestSignal);
+		const content = await readResponseText(res, requestSignal);
 		activityMonitor.logComplete(activityId, res.status);
 
 		const contentStart = content.indexOf("Markdown Content:");
@@ -564,7 +564,7 @@ async function extractViaHttp(
 		);
 
 		if (!response.ok) {
-			await discardResponseBody(response);
+			await discardResponseBody(response, "HTTP request failed", controller.signal);
 			activityMonitor.logComplete(activityId, response.status);
 			return {
 				url,
@@ -581,7 +581,7 @@ async function extractViaHttp(
 		if (contentLengthHeader) {
 			const contentLength = parseInt(contentLengthHeader, 10);
 			if (contentLength > maxResponseSize) {
-				await discardResponseBody(response);
+				await discardResponseBody(response, "Response exceeded the content limit", controller.signal);
 				activityMonitor.logComplete(activityId, response.status);
 				return {
 					url,
@@ -616,7 +616,7 @@ async function extractViaHttp(
 			contentType.includes("audio/") ||
 			contentType.includes("video/") ||
 			contentType.includes("application/zip")) {
-			await discardResponseBody(response);
+			await discardResponseBody(response, "Unsupported content type", controller.signal);
 			activityMonitor.logComplete(activityId, response.status);
 			return {
 				url,
@@ -707,9 +707,7 @@ function fetchLimitedContent(
 	signal?: AbortSignal,
 	options?: ExtractOptions,
 ): Promise<ExtractedContent> {
-	let started = false;
-	const operation = fetchLimit(async () => {
-		started = true;
+	return fetchLimit.run(async () => {
 		if (signal?.aborted) return abortedResult(url);
 		try {
 			return await extractContent(url, signal, options);
@@ -717,35 +715,7 @@ function fetchLimitedContent(
 			if (signal?.aborted) return abortedResult(url);
 			throw error;
 		}
-	});
-	if (!signal) return operation;
-
-	return new Promise<ExtractedContent>((resolve, reject) => {
-		let settled = false;
-		const onAbort = (): void => {
-			if (started || settled) return;
-			settled = true;
-			signal.removeEventListener("abort", onAbort);
-			reject(abortReason(signal));
-		};
-		signal.addEventListener("abort", onAbort, { once: true });
-		if (signal.aborted) onAbort();
-
-		operation.then(
-			(result) => {
-				if (settled) return;
-				settled = true;
-				signal.removeEventListener("abort", onAbort);
-				resolve(result);
-			},
-			(error: unknown) => {
-				if (settled) return;
-				settled = true;
-				signal.removeEventListener("abort", onAbort);
-				reject(error);
-			},
-		);
-	});
+	}, signal);
 }
 
 export async function fetchAllContent(

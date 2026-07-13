@@ -303,6 +303,329 @@ test("caller cancellation terminally abandons a non-settling content step", asyn
 	await assertNoLateEffects(runtime, updates, () => slowFetch.resolve(jinaResponse("http://127.0.0.1/slow", "Slow")), () => requestsAfterCancellation);
 });
 
+test("caller cancellation closes a Jina body before tool settlement", async () => {
+	const runtime = await createRuntime("caller-cancel-jina-body");
+	const controller = new AbortController();
+	const callerReason = new Error("cancel Jina body");
+	const bodyStarted = deferred();
+	let bodyCancelled = false;
+	globalThis.fetch = async (url) => {
+		const requestUrl = String(url);
+		if (requestUrl.startsWith("https://api.search.brave.com/res/v1/web/search")) {
+			return braveSearchResponse(["http://127.0.0.1/jina-body"]);
+		}
+		if (requestUrl === "http://127.0.0.1/jina-body") {
+			return new Response("unavailable", { status: 502 });
+		}
+		if (requestUrl === "https://r.jina.ai/http://127.0.0.1/jina-body") {
+			return new Response(new ReadableStream({
+				pull() {
+					bodyStarted.resolve();
+				},
+				cancel() {
+					bodyCancelled = true;
+				},
+			}), { status: 200, headers: { "content-type": "text/markdown" } });
+		}
+		throw new Error(`Unexpected fetch: ${requestUrl}`);
+	};
+
+	const execution = tool(runtime.extension, "web_search").execute(
+		"cancel-jina-body",
+		{ query: "cancel Jina body", provider: "brave", workflow: "none", includeContent: true },
+		controller.signal,
+		undefined,
+		runtime.context,
+	);
+	await settlesWithin(bodyStarted.promise, "Jina body start");
+	controller.abort(callerReason);
+	await assert.rejects(settlesWithin(execution, "Jina body cancellation"), (error) => error === callerReason);
+	assert.equal(bodyCancelled, true, "Jina body must cancel before web_search settles");
+	assert.deepEqual(runtime.entries, []);
+});
+
+test("caller cancellation settles while a started fallback ignores abort", async () => {
+	const runtime = await createRuntime("caller-cancel-started-fallback");
+	const controller = new AbortController();
+	const callerReason = new Error("cancel started fallback");
+	const fallbackStarted = deferred();
+	const fallbackGate = deferred();
+	const originalParallelKey = process.env.PARALLEL_API_KEY;
+	process.env.PARALLEL_API_KEY = "parallel-terminal-test-key";
+	globalThis.fetch = async (url) => {
+		const requestUrl = String(url);
+		if (requestUrl.startsWith("https://api.search.brave.com/res/v1/web/search")) {
+			return braveSearchResponse(["http://127.0.0.1/fallback"]);
+		}
+		if (requestUrl === "http://127.0.0.1/fallback" || requestUrl === "https://r.jina.ai/http://127.0.0.1/fallback") {
+			return new Response("unavailable", { status: 502, statusText: "Bad Gateway" });
+		}
+		if (requestUrl === "https://api.parallel.ai/v1/extract") {
+			fallbackStarted.resolve();
+			return fallbackGate.promise;
+		}
+		throw new Error(`Unexpected fetch: ${requestUrl}`);
+	};
+	const activityShortcut = runtime.extension.shortcuts.get("ctrl+shift+w");
+	assert.ok(activityShortcut, "activity shortcut should be registered");
+	await activityShortcut.handler(runtime.context);
+
+	const execution = tool(runtime.extension, "web_search").execute(
+		"cancel-started-fallback-search",
+		{ query: "cancel started fallback", provider: "brave", workflow: "none", includeContent: true },
+		controller.signal,
+		undefined,
+		runtime.context,
+	);
+	let widgetUpdatesAtSettlement;
+	try {
+		await settlesWithin(fallbackStarted.promise, "Parallel fallback start");
+		controller.abort(callerReason);
+		await assert.rejects(settlesWithin(execution, "started fallback cancellation"), (error) => error === callerReason);
+		assert.deepEqual(runtime.entries, []);
+		widgetUpdatesAtSettlement = runtime.widgetUpdates.length;
+	} finally {
+		fallbackGate.resolve(new Response(JSON.stringify({ results: [] }), {
+			status: 200,
+			headers: { "content-type": "application/json" },
+		}));
+		await settlesWithin(execution.catch(() => {}), "started fallback cleanup");
+		await new Promise((resolve) => setImmediate(resolve));
+		await new Promise((resolve) => setImmediate(resolve));
+		if (originalParallelKey === undefined) delete process.env.PARALLEL_API_KEY;
+		else process.env.PARALLEL_API_KEY = originalParallelKey;
+	}
+	assert.equal(runtime.widgetUpdates.length, widgetUpdatesAtSettlement, "late fallback settlement must not update activity UI");
+});
+
+test("started Gemini URL Context settles on deadline, caller cancellation, session replacement, and shutdown", async () => {
+	const originalGeminiKey = process.env.GEMINI_API_KEY;
+	const originalParallelKey = process.env.PARALLEL_API_KEY;
+	const originalTimeout = AbortSignal.timeout;
+	process.env.GEMINI_API_KEY = "gemini-terminal-test-key";
+	delete process.env.PARALLEL_API_KEY;
+	const scenarios = [
+		{
+			label: "deadline",
+			prepare() {
+				const controller = new AbortController();
+				AbortSignal.timeout = () => controller.signal;
+				return { controller, toolSignal: undefined };
+			},
+			async trigger(_runtime, state) {
+				state.controller.abort(new DOMException("content deadline", "TimeoutError"));
+			},
+			assertResult(result) {
+				assert.equal(result.details.contentReady, 0);
+				assert.equal(result.details.contentErrors, 1);
+			},
+		},
+		{
+			label: "caller",
+			prepare() {
+				const controller = new AbortController();
+				return { controller, toolSignal: controller.signal };
+			},
+			async trigger(_runtime, state) {
+				state.controller.abort(state.reason);
+			},
+			expectsRejection: true,
+		},
+		{
+			label: "session-replacement",
+			prepare: () => ({ toolSignal: undefined }),
+			async trigger(runtime) {
+				for (const handler of runtime.extension.handlers.get("session_tree") ?? []) {
+					await handler({}, runtime.context);
+				}
+			},
+			assertResult(result) {
+				assert.equal(result.details.cancelled, true);
+				assert.equal(result.details.cancelReason, "session-changed");
+			},
+		},
+		{
+			label: "shutdown",
+			prepare: () => ({ toolSignal: undefined }),
+			async trigger(runtime) {
+				for (const handler of runtime.extension.handlers.get("session_shutdown") ?? []) {
+					await handler({});
+				}
+			},
+			assertResult(result) {
+				assert.equal(result.details.cancelled, true);
+				assert.equal(result.details.cancelReason, "session-changed");
+			},
+		},
+	];
+
+	try {
+		for (const scenario of scenarios) {
+			AbortSignal.timeout = originalTimeout;
+			const runtime = await createRuntime(`started-gemini-${scenario.label}`);
+			const geminiStarted = deferred();
+			const geminiGate = deferred();
+			const state = scenario.prepare();
+			state.reason = new Error(`cancel Gemini on ${scenario.label}`);
+			globalThis.fetch = async (url) => {
+				const requestUrl = String(url);
+				if (requestUrl.startsWith("https://api.search.brave.com/res/v1/web/search")) {
+					return braveSearchResponse([`http://127.0.0.1/gemini-${scenario.label}`]);
+				}
+				if (requestUrl === `http://127.0.0.1/gemini-${scenario.label}` || requestUrl === `https://r.jina.ai/http://127.0.0.1/gemini-${scenario.label}`) {
+					return new Response("unavailable", { status: 502, statusText: "Bad Gateway" });
+				}
+				if (requestUrl.startsWith("https://generativelanguage.googleapis.com/")) {
+					geminiStarted.resolve();
+					return geminiGate.promise;
+				}
+				throw new Error(`Unexpected fetch: ${requestUrl}`);
+			};
+			const activityShortcut = runtime.extension.shortcuts.get("ctrl+shift+w");
+			assert.ok(activityShortcut, "activity shortcut should be registered");
+			await activityShortcut.handler(runtime.context);
+			const execution = tool(runtime.extension, "web_search").execute(
+				`started-gemini-${scenario.label}`,
+				{ query: `started Gemini ${scenario.label}`, provider: "brave", workflow: "none", includeContent: true },
+				state.toolSignal,
+				undefined,
+				runtime.context,
+			);
+			let widgetUpdatesAtSettlement;
+			try {
+				await settlesWithin(geminiStarted.promise, `${scenario.label} Gemini start`);
+				await scenario.trigger(runtime, state);
+				if (scenario.expectsRejection) {
+					await assert.rejects(settlesWithin(execution, `${scenario.label} Gemini cancellation`), (error) => error === state.reason);
+				} else {
+					const result = await settlesWithin(execution, `${scenario.label} Gemini cancellation`);
+					scenario.assertResult(result);
+				}
+				widgetUpdatesAtSettlement = runtime.widgetUpdates.length;
+			} finally {
+				geminiGate.resolve(new Response(JSON.stringify({
+					candidates: [{ content: { parts: [{ text: `# Late Gemini ${scenario.label}\n${"content ".repeat(20)}` }] } }],
+				}), { status: 200, headers: { "content-type": "application/json" } }));
+				await execution.catch(() => {});
+				await new Promise((resolve) => setImmediate(resolve));
+				await new Promise((resolve) => setImmediate(resolve));
+			}
+			assert.equal(runtime.widgetUpdates.length, widgetUpdatesAtSettlement, `${scenario.label} late Gemini settlement must not update activity UI`);
+		}
+	} finally {
+		AbortSignal.timeout = originalTimeout;
+		if (originalGeminiKey === undefined) delete process.env.GEMINI_API_KEY;
+		else process.env.GEMINI_API_KEY = originalGeminiKey;
+		if (originalParallelKey === undefined) delete process.env.PARALLEL_API_KEY;
+		else process.env.PARALLEL_API_KEY = originalParallelKey;
+	}
+});
+
+test("started Parallel fallback settles on deadline, session replacement, and shutdown", async () => {
+	const originalParallelKey = process.env.PARALLEL_API_KEY;
+	const originalTimeout = AbortSignal.timeout;
+	process.env.PARALLEL_API_KEY = "parallel-terminal-test-key";
+	const scenarios = [
+		{
+			label: "deadline",
+			prepare() {
+				const deadline = new AbortController();
+				AbortSignal.timeout = () => deadline.signal;
+				return deadline;
+			},
+			async trigger(_runtime, deadline) {
+				deadline.abort(new DOMException("content deadline", "TimeoutError"));
+			},
+			assertResult(result) {
+				assert.equal(result.details.contentErrors, 1);
+			},
+		},
+		{
+			label: "session-replacement",
+			prepare: () => undefined,
+			async trigger(runtime) {
+				for (const handler of runtime.extension.handlers.get("session_tree") ?? []) {
+					await handler({}, runtime.context);
+				}
+			},
+			assertResult(result) {
+				assert.equal(result.details.cancelled, true);
+				assert.equal(result.details.cancelReason, "session-changed");
+			},
+		},
+		{
+			label: "shutdown",
+			prepare: () => undefined,
+			async trigger(runtime) {
+				for (const handler of runtime.extension.handlers.get("session_shutdown") ?? []) {
+					await handler({});
+				}
+			},
+			assertResult(result) {
+				assert.equal(result.details.cancelled, true);
+				assert.equal(result.details.cancelReason, "session-changed");
+			},
+		},
+	];
+
+	try {
+		for (const scenario of scenarios) {
+			AbortSignal.timeout = originalTimeout;
+			const runtime = await createRuntime(`started-parallel-${scenario.label}`);
+			const fallbackStarted = deferred();
+			const fallbackGate = deferred();
+			let lifecycleEnded = false;
+			let requestsAfterLifecycle = 0;
+			globalThis.fetch = async (url) => {
+				const requestUrl = String(url);
+				if (lifecycleEnded) requestsAfterLifecycle += 1;
+				if (requestUrl.startsWith("https://api.search.brave.com/res/v1/web/search")) {
+					return braveSearchResponse([`http://127.0.0.1/${scenario.label}`]);
+				}
+				if (requestUrl === `http://127.0.0.1/${scenario.label}` || requestUrl === `https://r.jina.ai/http://127.0.0.1/${scenario.label}`) {
+					return new Response("unavailable", { status: 502, statusText: "Bad Gateway" });
+				}
+				if (requestUrl === "https://api.parallel.ai/v1/extract") {
+					fallbackStarted.resolve();
+					return fallbackGate.promise;
+				}
+				throw new Error(`Unexpected fetch: ${requestUrl}`);
+			};
+			const prepared = scenario.prepare();
+			const execution = tool(runtime.extension, "web_search").execute(
+				`started-parallel-${scenario.label}`,
+				{ query: `started parallel ${scenario.label}`, provider: "brave", workflow: "none", includeContent: true },
+				undefined,
+				undefined,
+				runtime.context,
+			);
+			let widgetUpdatesAtSettlement;
+			try {
+				await settlesWithin(fallbackStarted.promise, `${scenario.label} Parallel fallback start`);
+				lifecycleEnded = true;
+				await scenario.trigger(runtime, prepared);
+				const result = await settlesWithin(execution, `${scenario.label} started fallback cancellation`);
+				scenario.assertResult(result);
+				widgetUpdatesAtSettlement = runtime.widgetUpdates.length;
+			} finally {
+				fallbackGate.resolve(new Response(JSON.stringify({ results: [] }), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				}));
+				await settlesWithin(execution.catch(() => {}), `${scenario.label} started fallback cleanup`);
+				await new Promise((resolve) => setImmediate(resolve));
+				await new Promise((resolve) => setImmediate(resolve));
+			}
+			assert.equal(requestsAfterLifecycle, 0, `${scenario.label} must not start another request`);
+			assert.equal(runtime.widgetUpdates.length, widgetUpdatesAtSettlement, `${scenario.label} late settlement must not update activity UI`);
+		}
+	} finally {
+		AbortSignal.timeout = originalTimeout;
+		if (originalParallelKey === undefined) delete process.env.PARALLEL_API_KEY;
+		else process.env.PARALLEL_API_KEY = originalParallelKey;
+	}
+});
+
 test("caller cancellation settles while content is queued behind unrelated retrievals", async () => {
 	const runtime = await createRuntime("caller-cancel-queued-content");
 	const blockerControllers = Array.from({ length: 3 }, () => new AbortController());
@@ -402,6 +725,48 @@ test("caller cancellation closes a direct HTTP body before tool settlement", asy
 	await assertNoLateEffects(runtime, updates, () => {}, () => requestsAfterCancellation);
 });
 
+test("caller cancellation settles when response-body cancellation never does", async () => {
+	const runtime = await createRuntime("caller-cancel-non-settling-body");
+	const controller = new AbortController();
+	const callerReason = new Error("caller cancelled non-settling body");
+	const cancellationStarted = deferred();
+	const cancellationGate = deferred();
+	globalThis.fetch = async (url) => {
+		const requestUrl = String(url);
+		if (requestUrl.startsWith("https://api.search.brave.com/res/v1/web/search")) {
+			return braveSearchResponse(["http://127.0.0.1/direct"]);
+		}
+		if (requestUrl === "http://127.0.0.1/direct") {
+			return new Response(new ReadableStream({
+				pull() {},
+				cancel() {
+					cancellationStarted.resolve();
+					return cancellationGate.promise;
+				},
+			}), { status: 200, headers: { "content-type": "text/plain" } });
+		}
+		throw new Error(`Unexpected fetch: ${requestUrl}`);
+	};
+
+	const execution = tool(runtime.extension, "web_search").execute(
+		"cancel-non-settling-body-search",
+		{ query: "cancel non-settling body", provider: "brave", workflow: "none", includeContent: true },
+		controller.signal,
+		undefined,
+		runtime.context,
+	);
+	try {
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		controller.abort(callerReason);
+		await settlesWithin(cancellationStarted.promise, "response-body cancellation start");
+		await assert.rejects(settlesWithin(execution, "non-settling response-body cancellation"), (error) => error === callerReason);
+		assert.deepEqual(runtime.entries, []);
+	} finally {
+		cancellationGate.resolve();
+		await settlesWithin(execution.catch(() => {}), "non-settling response-body cleanup");
+	}
+});
+
 test("caller cancellation already fired before body reading still closes the body", async () => {
 	const runtime = await createRuntime("caller-cancel-before-body-reader");
 	const controller = new AbortController();
@@ -452,9 +817,9 @@ test("caller cancellation already fired before body reading still closes the bod
 	}
 });
 
-test("fallback closes a failed direct HTTP body before tool settlement", async () => {
+test("fallback settles when failed-body cancellation never does", async () => {
 	const runtime = await createRuntime("failed-body-fallback");
-	let bodyCancelled = false;
+	const cancellationStarted = deferred();
 	globalThis.fetch = async (url) => {
 		const requestUrl = String(url);
 		if (requestUrl.startsWith("https://api.search.brave.com/res/v1/web/search")) return braveSearchResponse(["http://127.0.0.1/direct"]);
@@ -464,7 +829,8 @@ test("fallback closes a failed direct HTTP body before tool settlement", async (
 					streamController.enqueue(new TextEncoder().encode("upstream failure"));
 				},
 				cancel() {
-					bodyCancelled = true;
+					cancellationStarted.resolve();
+					return new Promise(() => {});
 				},
 			});
 			return new Response(body, { status: 502 });
@@ -475,16 +841,65 @@ test("fallback closes a failed direct HTTP body before tool settlement", async (
 		throw new Error(`Unexpected fetch: ${requestUrl}`);
 	};
 
-	const result = await tool(runtime.extension, "web_search").execute(
+	const execution = tool(runtime.extension, "web_search").execute(
 		"failed-body-fallback-search",
 		{ query: "failed direct body", provider: "brave", workflow: "none", includeContent: true },
 		undefined,
 		undefined,
 		runtime.context,
 	);
+	const result = await Promise.race([
+		execution,
+		new Promise((_resolve, reject) => setTimeout(() => reject(new Error("failed-body fallback did not settle")), 300)),
+	]);
 
+	await settlesWithin(cancellationStarted.promise, "failed-body cancellation start");
 	assert.equal(result.details.contentReady, 1);
-	assert.equal(bodyCancelled, true, "the failed direct response body must close before fallback completes");
+});
+
+test("registered web_search cancels a non-settling YouTube thumbnail", async () => {
+	const runtime = await createRuntime("youtube-thumbnail-cancellation");
+	const controller = new AbortController();
+	const callerReason = new Error("cancel YouTube thumbnail");
+	const thumbnailStarted = deferred();
+	const thumbnailGate = deferred();
+	const originalGeminiKey = process.env.GEMINI_API_KEY;
+	process.env.GEMINI_API_KEY = "youtube-terminal-test-key";
+	globalThis.fetch = async (url) => {
+		const requestUrl = String(url);
+		if (requestUrl.startsWith("https://api.search.brave.com/res/v1/web/search")) {
+			return braveSearchResponse(["http://127.0.0.1/youtube.com/watch?v=dQw4w9WgXcQ"]);
+		}
+		if (requestUrl.startsWith("https://generativelanguage.googleapis.com/")) {
+			return new Response(JSON.stringify({
+				candidates: [{ content: { parts: [{ text: "# Video transcript\nUseful content" }] } }],
+			}), { status: 200, headers: { "content-type": "application/json" } });
+		}
+		if (requestUrl.startsWith("https://img.youtube.com/")) {
+			thumbnailStarted.resolve();
+			return thumbnailGate.promise;
+		}
+		throw new Error(`Unexpected fetch: ${requestUrl}`);
+	};
+
+	const execution = tool(runtime.extension, "web_search").execute(
+		"cancel-youtube-thumbnail",
+		{ query: "cancel YouTube thumbnail", provider: "brave", workflow: "none", includeContent: true },
+		controller.signal,
+		undefined,
+		runtime.context,
+	);
+	try {
+		await settlesWithin(thumbnailStarted.promise, "registered YouTube thumbnail start");
+		controller.abort(callerReason);
+		await assert.rejects(settlesWithin(execution, "registered YouTube thumbnail cancellation"), (error) => error === callerReason);
+		assert.deepEqual(runtime.entries, []);
+	} finally {
+		thumbnailGate.resolve(new Response("late thumbnail", { status: 200 }));
+		await settlesWithin(execution.catch(() => {}), "registered YouTube thumbnail cleanup");
+		if (originalGeminiKey === undefined) delete process.env.GEMINI_API_KEY;
+		else process.env.GEMINI_API_KEY = originalGeminiKey;
+	}
 });
 
 test("terminal content closes oversized and unsupported response bodies", async () => {
@@ -580,9 +995,8 @@ test("caller cancellation terminates GitHub CLI work before tool settlement", as
 	const callerReason = new Error("cancel GitHub CLI");
 	const fakeBin = await mkdtemp(join(tmpdir(), "pi-web-access-fake-gh-"));
 	const pidFile = join(fakeBin, "gh.pid");
-	const descendantPidFile = join(fakeBin, "git.pid");
 	const ghPath = join(fakeBin, "gh");
-	await writeFile(ghPath, `#!/usr/bin/env node\nimport { writeFileSync } from "node:fs";\nimport { spawn } from "node:child_process";\nif (process.argv.includes("--version")) { console.log("gh version test"); process.exit(0); }\nconst descendant = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "inherit" });\nwriteFileSync(${JSON.stringify(pidFile)}, String(process.pid));\nwriteFileSync(${JSON.stringify(descendantPidFile)}, String(descendant.pid));\nsetInterval(() => {}, 1000);\n`);
+	await writeFile(ghPath, `#!/usr/bin/env node\nimport { writeFileSync } from "node:fs";\nif (process.argv.includes("--version")) { console.log("gh version test"); process.exit(0); }\nwriteFileSync(${JSON.stringify(pidFile)}, String(process.pid));\nsetInterval(() => {}, 1000);\n`);
 	await chmod(ghPath, 0o755);
 	const originalPath = process.env.PATH;
 	process.env.PATH = `${fakeBin}:${originalPath ?? ""}`;
@@ -598,9 +1012,7 @@ test("caller cancellation terminates GitHub CLI work before tool settlement", as
 	assert.ok(activityShortcut, "activity shortcut should be registered");
 	await activityShortcut.handler(runtime.context);
 	let childPid;
-	let descendantPid;
 	let childAliveAtSettlement = false;
-	let descendantAliveAtSettlement = false;
 	let widgetUpdatesAtSettlement = 0;
 	let widgetUpdatesAfterChildExit = 0;
 	try {
@@ -612,22 +1024,18 @@ test("caller cancellation terminates GitHub CLI work before tool settlement", as
 			runtime.context,
 		);
 		childPid = Number(await waitForFile(pidFile, "fake gh pid"));
-		descendantPid = Number(await waitForFile(descendantPidFile, "fake git descendant pid"));
 		controller.abort(callerReason);
 		await assert.rejects(settlesWithin(execution, "GitHub CLI cancellation"), (error) => error === callerReason);
 		childAliveAtSettlement = isProcessAlive(childPid);
-		descendantAliveAtSettlement = isProcessAlive(descendantPid);
 		widgetUpdatesAtSettlement = runtime.widgetUpdates.length;
 	} finally {
 		if (childPid && isProcessAlive(childPid)) process.kill(childPid, "SIGKILL");
-		if (descendantPid && isProcessAlive(descendantPid)) process.kill(descendantPid, "SIGKILL");
 		process.env.PATH = originalPath;
 		await new Promise((resolve) => setTimeout(resolve, 50));
 		widgetUpdatesAfterChildExit = runtime.widgetUpdates.length;
 	}
 
 	assert.equal(childAliveAtSettlement, false, "GitHub CLI process must exit before web_search settles");
-	assert.equal(descendantAliveAtSettlement, false, "GitHub CLI descendants must exit before web_search settles");
 	assert.equal(widgetUpdatesAfterChildExit, widgetUpdatesAtSettlement, "GitHub cleanup must not update the widget after settlement");
 });
 

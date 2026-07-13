@@ -1,7 +1,9 @@
 import { activityMonitor } from "./activity.ts";
+import { settleWithAbort } from "./abort.ts";
 import { getApiKey, getVersionedApiBase, buildKeyParam, buildAuthHeaders, isGatewayConfigured, DEFAULT_MODEL } from "./gemini-api.ts";
 import { isGeminiWebAvailable, queryWithCookies } from "./gemini-web.ts";
 import { extractHeadingTitle, type ExtractedContent } from "./extract.ts";
+import { discardResponseBody, fetchOwnedResponse, readResponseText } from "./response-body.ts";
 
 const EXTRACTION_PROMPT = `Extract the complete readable content from this URL as clean markdown.
 Include the page title, all text content, code blocks, and tables.
@@ -30,22 +32,23 @@ export async function extractWithUrlContext(
 			tools: [{ url_context: {} }],
 		};
 
-		const res = await fetch(`${getVersionedApiBase()}/models/${model}:generateContent${buildKeyParam(apiKey)}`, {
+		const requestSignal = AbortSignal.any([
+			AbortSignal.timeout(60000),
+			...(signal ? [signal] : []),
+		]);
+		const res = await fetchOwnedResponse(`${getVersionedApiBase()}/models/${model}:generateContent${buildKeyParam(apiKey)}`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json", ...buildAuthHeaders() },
 			body: JSON.stringify(body),
-			signal: AbortSignal.any([
-				AbortSignal.timeout(60000),
-				...(signal ? [signal] : []),
-			]),
-		});
+		}, requestSignal);
 
 		if (!res.ok) {
+			await discardResponseBody(res, "Gemini URL Context request failed", requestSignal);
 			activityMonitor.logComplete(activityId, res.status);
 			return null;
 		}
 
-		const data = await res.json() as UrlContextResponse;
+		const data = JSON.parse(await readResponseText(res, requestSignal)) as UrlContextResponse;
 		activityMonitor.logComplete(activityId, res.status);
 
 		const metadata = data.candidates?.[0]?.url_context_metadata;
@@ -79,17 +82,17 @@ export async function extractWithGeminiWeb(
 	url: string,
 	signal?: AbortSignal,
 ): Promise<ExtractedContent | null> {
-	const cookies = await isGeminiWebAvailable();
+	const cookies = await settleWithAbort(() => isGeminiWebAvailable(), signal);
 	if (!cookies) return null;
 
 	const activityId = activityMonitor.logStart({ type: "api", query: `gemini_web: ${url}` });
 
 	try {
-		const text = await queryWithCookies(EXTRACTION_PROMPT + url, cookies, {
+		const text = await settleWithAbort(() => queryWithCookies(EXTRACTION_PROMPT + url, cookies, {
 			model: "gemini-3-flash-preview",
 			signal,
 			timeoutMs: 60000,
-		});
+		}), signal);
 
 		activityMonitor.logComplete(activityId, 200);
 

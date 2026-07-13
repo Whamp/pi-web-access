@@ -11,7 +11,7 @@ const codingAgentDir = join(dirname(codingAgentEntry), "..");
 const loaderUrl = pathToFileURL(join(dirname(codingAgentEntry), "core/extensions/loader.js"));
 const compatUrl = pathToFileURL(join(codingAgentDir, "node_modules/@earendil-works/pi-ai/dist/compat.js"));
 const { createExtensionRuntime, loadExtensionsCached } = await import(loaderUrl.href);
-const { registerApiProvider, unregisterApiProviders } = await import(compatUrl.href);
+const { createAssistantMessageEventStream, registerApiProvider, unregisterApiProviders } = await import(compatUrl.href);
 const extensionPath = fileURLToPath(new URL("../index.ts", import.meta.url));
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 const originalBraveKey = process.env.BRAVE_API_KEY;
@@ -266,21 +266,29 @@ test("session replacement prevents publication during summary authentication", a
 	assert.deepEqual(runtime.entries, []);
 });
 
-test("session replacement terminates non-cooperative summary completion", async () => {
+async function assertSummaryStreamEndsBeforeLifecycleSettlement(eventName, label) {
 	installSearchResponse();
 	const summaryStarted = deferred();
+	const summaryEnded = deferred();
 	const summaryGate = deferred();
 	const summaryModel = {
 		provider: "openai-codex",
 		id: "gpt-5.3-codex-spark",
 		name: "Non-cooperative summary model",
-		api: "non-cooperative-summary-test",
+		api: `non-cooperative-summary-${label}-test`,
 	};
 	registerApiProvider({
 		api: summaryModel.api,
 		stream() {
+			const completion = createAssistantMessageEventStream();
+			void (async () => {
+				for await (const _event of completion) {
+				}
+				summaryEnded.resolve();
+			})();
+			void summaryGate.promise.then((message) => completion.end(message));
 			summaryStarted.resolve();
-			return { result: () => summaryGate.promise };
+			return completion;
 		},
 	}, summaryProviderSource);
 	const runtime = await loadRuntime({}, {
@@ -288,18 +296,36 @@ test("session replacement terminates non-cooperative summary completion", async 
 		find: (provider, id) => provider === summaryModel.provider && id === summaryModel.id ? summaryModel : undefined,
 		getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "summary-test-key" }),
 	});
-	const execution = executeSearch(runtime, { query: "cancel summary completion", provider: "brave", workflow: "auto-summary" });
+	const execution = executeSearch(runtime, { query: `cancel summary completion on ${label}`, provider: "brave", workflow: "auto-summary" });
 	try {
-		await settlesWithin(summaryStarted.promise, "summary completion start");
-		for (const handler of runtime.extension.handlers.get("session_tree") ?? []) await handler({}, runtime.context);
-		const result = await settlesWithin(execution, "summary completion cancellation");
+		await settlesWithin(summaryStarted.promise, `${label} summary completion start`);
+		for (const handler of runtime.extension.handlers.get(eventName) ?? []) {
+			if (eventName === "session_tree") await handler({}, runtime.context);
+			else await handler({});
+		}
+		const result = await settlesWithin(execution, `${label} summary completion cancellation`);
 		assert.equal(result.details.cancelled, true);
 		assert.equal(result.details.cancelReason, "session-changed");
+		await settlesWithin(summaryEnded.promise, `${label} summary stream disposal`);
 		assert.deepEqual(runtime.entries, []);
+		assert.deepEqual(runtime.sent, []);
 	} finally {
+		const entryCount = runtime.entries.length;
+		const sentCount = runtime.sent.length;
 		summaryGate.resolve({ stopReason: "stop", content: [] });
-		await settlesWithin(execution.catch(() => {}), "summary test cleanup");
+		await settlesWithin(execution.catch(() => {}), `${label} summary test cleanup`);
+		await new Promise((resolve) => setImmediate(resolve));
+		assert.equal(runtime.entries.length, entryCount, "late summary completion must not publish an entry");
+		assert.equal(runtime.sent.length, sentCount, "late summary completion must not send a message");
 	}
+}
+
+test("session replacement terminates non-cooperative summary completion", async () => {
+	await assertSummaryStreamEndsBeforeLifecycleSettlement("session_tree", "session replacement");
+});
+
+test("shutdown terminates non-cooperative summary completion", async () => {
+	await assertSummaryStreamEndsBeforeLifecycleSettlement("session_shutdown", "shutdown");
 });
 
 test("/websearch explicitly starts the curator", async () => {

@@ -545,11 +545,11 @@ export default function (pi: ExtensionAPI) {
 		return true;
 	}
 
-	function buildSessionChangedCancellation(): {
+	function buildSessionChangedCancellation(operation = "Web search"): {
 		content: Array<{ type: "text"; text: string }>;
 		details: { error: string; cancelled: boolean; cancelReason: "session-changed" };
 	} {
-		const message = "Web search cancelled because the session changed.";
+		const message = `${operation} cancelled because the session changed.`;
 		return {
 			content: [{ type: "text", text: message }],
 			details: {
@@ -1695,7 +1695,7 @@ export default function (pi: ExtensionAPI) {
 				timestamp: Date.now(),
 				urls: stripThumbnails(fetchResults),
 			};
-			if (!publishStoredResult(data)) return buildSessionChangedCancellation();
+			if (!publishStoredResult(data)) return buildSessionChangedCancellation("Content retrieval");
 
 			// Single URL: return content directly (possibly truncated) with responseId
 			if (urlList.length === 1) {

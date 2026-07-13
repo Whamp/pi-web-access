@@ -1,4 +1,4 @@
-import { complete, type Message, type Model } from "@earendil-works/pi-ai/compat";
+import { stream, type Message, type Model } from "@earendil-works/pi-ai/compat";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { settleWithAbort } from "./abort.ts";
 import { loadEnabledModelPatterns, modelMatchesEnabledPatterns } from "./summary-model-scope.ts";
@@ -284,10 +284,22 @@ export async function generateSummaryDraft(
 				timestamp: Date.now(),
 			};
 
-			const response = await settleWithAbort(
-				() => complete(model, { messages: [userMessage] }, { apiKey, headers, signal }),
-				signal,
-			);
+			signal?.throwIfAborted();
+			const completion = stream(model, { messages: [userMessage] }, { apiKey, headers, signal });
+			const endOnAbort = (): void => {
+				try {
+					completion.end();
+				} catch {
+				}
+			};
+			signal?.addEventListener("abort", endOnAbort, { once: true });
+			if (signal?.aborted) endOnAbort();
+			let response: Awaited<ReturnType<typeof completion.result>>;
+			try {
+				response = await settleWithAbort(() => completion.result(), signal);
+			} finally {
+				signal?.removeEventListener("abort", endOnAbort);
+			}
 			if (response.stopReason === "aborted") {
 				throw new Error("Aborted");
 			}

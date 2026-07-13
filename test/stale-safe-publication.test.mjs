@@ -160,4 +160,5 @@ test("stale full-content publication uses the same cancellation and cache behavi
 		{ responseId: stalePublication.attemptedId, urlIndex: 0 },
 	);
 	stalePublication.assertCancelledWithoutCachedRecord(result, retrieved);
+	assert.match(result.content[0].text, /Content retrieval cancelled because the session changed\./);
 });

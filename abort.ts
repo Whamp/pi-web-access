@@ -22,7 +22,11 @@ export function settleWithAbort<T>(
 	}
 	const observed = Promise.resolve(operation);
 	const disposeLate = (value: T): void => {
-		if (onLateResolve) void Promise.resolve(onLateResolve(value)).catch(() => {});
+		if (!onLateResolve) return;
+		try {
+			void Promise.resolve(onLateResolve(value)).catch(() => {});
+		} catch {
+		}
 	};
 	if (!signal) return observed;
 	if (signal.aborted) {

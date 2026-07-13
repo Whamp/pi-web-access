@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import { fetchRemoteUrl, validateRemoteUrl } from "../ssrf-protection.ts";
@@ -62,6 +65,23 @@ test("validateRemoteUrl blocks hostnames that resolve to private addresses", asy
 		}),
 		/Blocked internal address for example\.test: fd00::1/,
 	);
+});
+
+test("validateRemoteUrl blocks private OS resolver aliases used by the transport", async () => {
+	const directory = await mkdtemp(join(tmpdir(), "pi-web-access-host-alias-"));
+	const aliases = join(directory, "aliases");
+	await writeFile(aliases, "piwassrfalias localhost\n");
+	const originalAliases = process.env.HOSTALIASES;
+	process.env.HOSTALIASES = aliases;
+	try {
+		await assert.rejects(
+			validateRemoteUrl("http://piwassrfalias/"),
+			/Blocked internal address for piwassrfalias/,
+		);
+	} finally {
+		if (originalAliases === undefined) delete process.env.HOSTALIASES;
+		else process.env.HOSTALIASES = originalAliases;
+	}
 });
 
 test("validateRemoteUrl permits public HTTP and HTTPS targets", async () => {
