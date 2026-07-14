@@ -10,14 +10,17 @@ const loaderUrl = pathToFileURL(join(dirname(codingAgentEntry), "core/extensions
 const { createExtensionRuntime, loadExtensionsCached } = await import(loaderUrl.href);
 const extensionPath = fileURLToPath(new URL("../index.ts", import.meta.url));
 
-async function loadRegisteredTools(branch = []) {
-	const configDir = await mkdtemp(join(tmpdir(), "pi-web-access-content-result-"));
+async function loadRegisteredTools(branch = [], options = {}) {
+	const configDir = options.configDir ?? await mkdtemp(join(tmpdir(), "pi-web-access-content-result-"));
 	await writeFile(join(configDir, "web-search.json"), JSON.stringify({ ssrf: { allowRanges: ["127.0.0.0/8"] } }));
 	process.env.PI_CODING_AGENT_DIR = configDir;
 
 	const runtime = createExtensionRuntime();
 	const entries = [];
-	runtime.appendEntry = (customType, data) => entries.push({ customType, data });
+	runtime.appendEntry = (customType, data) => {
+		options.appendEntry?.(customType, data);
+		entries.push({ customType, data });
+	};
 	runtime.refreshTools = () => {};
 	runtime.getActiveTools = () => [];
 	runtime.getAllTools = () => [];
@@ -185,6 +188,44 @@ test("content retrieval errors name resultId and show corrective choices", async
 	});
 	assert.match(failedResult.content[0].text, new RegExp(`resultId "${failedFetch.details.contentResultId}"`));
 	assert.match(failedResult.content[0].text, /not-a-url/);
+});
+
+test("a failed content publication is not retrievable from another cached runtime", async () => {
+	const configDir = await mkdtemp(join(tmpdir(), "pi-web-access-content-publication-"));
+	let unpublishedResultId;
+	const publicationError = new Error("This extension ctx is stale");
+	const failingRuntime = await loadRegisteredTools([], {
+		configDir,
+		appendEntry(_customType, data) {
+			unpublishedResultId = data.id;
+			throw publicationError;
+		},
+	});
+	const otherRuntime = await loadRegisteredTools([], { configDir });
+	assert.ok(failingRuntime.fetchContent);
+	assert.ok(otherRuntime.getSearchContent);
+	mockJinaPages({
+		"http://127.0.0.1/unpublished": {
+			title: "Unpublished page",
+			content: "This content must remain private to the failed publication.",
+		},
+	});
+
+	await assert.rejects(
+		failingRuntime.fetchContent.execute("fetch-unpublished", { url: "http://127.0.0.1/unpublished" }),
+		publicationError,
+	);
+	assert.equal(failingRuntime.entries.length, 0);
+	assert.equal(typeof unpublishedResultId, "string");
+
+	const retrieved = await otherRuntime.getSearchContent.execute("get-unpublished", {
+		resultId: unpublishedResultId,
+	});
+	assert.equal(retrieved.details.error, "Not found");
+	assert.equal(retrieved.details.resultId, unpublishedResultId);
+	assert.match(retrieved.content[0].text, new RegExp(`resultId "${unpublishedResultId}"`));
+
+	await loadRegisteredTools([], { configDir });
 });
 
 test("a restored single-page content result opens with resultId alone", async () => {

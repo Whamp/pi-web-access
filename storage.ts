@@ -61,8 +61,8 @@ function publishContentResult(
 		timestamp: Date.now(),
 		urls: storedUrls,
 	};
-	storeResult(contentResultId, data);
 	publisher.appendEntry("web-search-results", data);
+	storeResult(contentResultId, data);
 }
 
 export function createContentResult(
