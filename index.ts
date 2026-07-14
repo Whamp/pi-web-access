@@ -9,19 +9,9 @@ import type { ResolvedSearchProvider, SearchProvider, SearchResult } from "./sea
 import { webSearch } from "./web-search.ts";
 import { formatSeconds, getWebSearchConfigDir, getWebSearchConfigPath } from "./utils.ts";
 import {
-	clearResults,
 	contentRetrievalCall,
-	createContentResult,
-	deleteResult,
-	generateId,
-	getAllResults,
-	getResult,
-	reserveContentResultId,
-	restoreFromSession,
-	retrieveContentResult,
-	storeResult,
+	createStoredResultStore,
 	type QueryResultData,
-	type StoredResultData,
 } from "./storage.ts";
 import { activityMonitor, type ActivityEntry } from "./activity.ts";
 import { startCuratorServer, type CuratorServerHandle } from "./curator-server.ts";
@@ -503,6 +493,7 @@ function formatEntryLine(
 }
 
 export default function (pi: ExtensionAPI) {
+	const storedResultStore = createStoredResultStore();
 	const initConfig = loadConfigForExtensionInit();
 	const curateKey = initConfig.shortcuts?.curate || DEFAULT_SHORTCUTS.curate;
 	const activityKey = initConfig.shortcuts?.activity || DEFAULT_SHORTCUTS.activity;
@@ -521,7 +512,7 @@ export default function (pi: ExtensionAPI) {
 		closeCurator();
 		clearCloneCache();
 		sessionActive = true;
-		restoreFromSession(ctx);
+		storedResultStore.restoreFromSession(ctx);
 		// Unsubscribe before clear() to avoid callback with stale ctx
 		widgetUnsubscribe?.();
 		widgetUnsubscribe = null;
@@ -541,7 +532,7 @@ export default function (pi: ExtensionAPI) {
 		try {
 			const fetched = await fetchAllContent(urls, controller.signal);
 			if (!sessionActive || !pendingFetches.has(contentResultId)) return;
-			createContentResult(fetched, pi, contentResultId);
+			storedResultStore.createContentResult(fetched, pi, contentResultId);
 			const ok = fetched.filter(f => !f.error).length;
 			pi.sendMessage(
 				{
@@ -582,7 +573,7 @@ export default function (pi: ExtensionAPI) {
 
 	function startBackgroundFetch(urls: string[]): string | null {
 		if (urls.length === 0) return null;
-		const contentResultId = reserveContentResultId();
+		const contentResultId = storedResultStore.reserveContentResultId();
 		const controller = new AbortController();
 		pendingFetches.set(contentResultId, controller);
 		void fetchAndPublishInBackground(contentResultId, urls, controller);
@@ -590,13 +581,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function storeAndPublishSearch(results: QueryResultData[]): string {
-		const id = generateId();
-		const data: StoredResultData = {
-			id, type: "search", timestamp: Date.now(), queries: results,
-		};
-		storeResult(id, data);
-		pi.appendEntry("web-search-results", data);
-		return id;
+		return storedResultStore.createSearchResult(results, pi);
 	}
 
 	interface SearchReturnOptions {
@@ -858,21 +843,21 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		const hasInlineReady = hasFullInlineCoverage(opts.urls, opts.inlineContent);
-		let fetchId: string | null = null;
+		let contentResultId: string | null = null;
 		if (hasInlineReady && opts.inlineContent) {
-			fetchId = createContentResult(opts.inlineContent, pi);
+			contentResultId = storedResultStore.createContentResult(opts.inlineContent, pi);
 			if (!hasApprovedSummary) {
-				output += `---\nFull content for ${opts.inlineContent.length} sources available [${fetchId}].`;
+				output += `---\nFull content for ${opts.inlineContent.length} sources available [${contentResultId}].`;
 			}
 		} else if (opts.includeContent) {
-			fetchId = startBackgroundFetch(opts.urls);
-			if (fetchId && !hasApprovedSummary) {
-				output += `---\nContent fetching in background [${fetchId}]. Will notify when ready.`;
+			contentResultId = startBackgroundFetch(opts.urls);
+			if (contentResultId && !hasApprovedSummary) {
+				output += `---\nContent fetching in background [${contentResultId}]. Will notify when ready.`;
 			}
 		}
 
 		const searchId = storeAndPublishSearch(opts.results);
-		const isBackgroundFetch = fetchId !== null && !hasInlineReady;
+		const isBackgroundFetch = contentResultId !== null && !hasInlineReady;
 
 		return {
 			content: [{ type: "text", text: output.trim() }],
@@ -882,7 +867,7 @@ export default function (pi: ExtensionAPI) {
 				successfulQueries: sc,
 				totalResults: tr,
 				includeContent: opts.includeContent,
-				fetchId,
+				contentResultId,
 				fetchUrls: isBackgroundFetch ? opts.urls : undefined,
 				searchId,
 				...(opts.curated ? {
@@ -1209,7 +1194,7 @@ export default function (pi: ExtensionAPI) {
 		abortPendingFetches();
 		closeCurator();
 		clearCloneCache();
-		clearResults();
+		storedResultStore.clear();
 		// Unsubscribe before clear() to avoid callback with stale ctx
 		widgetUnsubscribe?.();
 		widgetUnsubscribe = null;
@@ -1549,7 +1534,7 @@ export default function (pi: ExtensionAPI) {
 				successfulQueries?: number;
 				totalResults?: number;
 				error?: string;
-				fetchId?: string;
+				contentResultId?: string;
 				fetchUrls?: string[];
 				phase?: string;
 				progress?: number;
@@ -1633,9 +1618,9 @@ export default function (pi: ExtensionAPI) {
 			if (details?.curated && details?.curatedFrom) {
 				statusLine += theme.fg("muted", ` (${details.queryCount}/${details.curatedFrom} queries curated)`);
 			}
-			if (details?.fetchId && details?.fetchUrls) {
+			if (details?.contentResultId && details?.fetchUrls) {
 				statusLine += theme.fg("muted", ` (fetching ${details.fetchUrls.length} URLs)`);
-			} else if (details?.fetchId) {
+			} else if (details?.contentResultId) {
 				statusLine += theme.fg("muted", " (content ready)");
 			}
 
@@ -1811,7 +1796,7 @@ export default function (pi: ExtensionAPI) {
 			const successful = fetchResults.filter((r) => !r.error).length;
 			const totalChars = fetchResults.reduce((sum, r) => sum + r.content.length, 0);
 
-			const contentResultId = createContentResult(fetchResults, pi);
+			const contentResultId = storedResultStore.createContentResult(fetchResults, pi);
 
 			// Single URL: return content directly (possibly truncated) with contentResultId
 			if (urlList.length === 1) {
@@ -2028,13 +2013,13 @@ export default function (pi: ExtensionAPI) {
 		}),
 
 		async execute(_toolCallId, params) {
-			const contentResult = retrieveContentResult(params.resultId, {
+			const contentResult = storedResultStore.retrieveContentResult(params.resultId, {
 				url: params.url,
 				urlIndex: params.urlIndex,
 			});
 			if (contentResult) return contentResult;
 
-			const data = getResult(params.resultId);
+			const data = storedResultStore.get(params.resultId);
 			if (data?.type === "search" && data.queries) {
 				let queryData: QueryResultData | undefined;
 
@@ -2477,7 +2462,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("search", {
 		description: "Browse stored web search results",
 		handler: async (_args, ctx) => {
-			const results = getAllResults();
+			const results = storedResultStore.getAll();
 
 			if (results.length === 0) {
 				ctx.ui.notify("No stored search results", "info");
@@ -2510,7 +2495,7 @@ export default function (pi: ExtensionAPI) {
 			const action = await ctx.ui.select(`Result ${selected.id.slice(0, 6)}`, actions);
 
 			if (action === "Delete") {
-				deleteResult(selected.id);
+				storedResultStore.delete(selected.id);
 				ctx.ui.notify(`Deleted ${selected.id.slice(0, 6)}`, "info");
 			} else if (action === "View details") {
 				let info = `ID: ${selected.id}\nType: ${selected.type}\nAge: ${Math.floor((Date.now() - selected.timestamp) / 60000)}m\n\n`;

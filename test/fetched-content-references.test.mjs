@@ -44,14 +44,18 @@ async function loadRegisteredTools(branch = [], options = {}) {
 		sessionManager: { getBranch: () => branch },
 		ui: { setWidget() {}, notify() {} },
 	};
-	for (const handler of extension.handlers.get("session_start") ?? []) {
-		await handler({ reason: "startup" }, context);
+	async function startSession() {
+		for (const handler of extension.handlers.get("session_start") ?? []) {
+			await handler({ reason: "startup" }, context);
+		}
 	}
+	if (options.startSession !== false) await startSession();
 
 	return {
 		entries,
 		fetchContent: extension.tools.get("fetch_content")?.definition,
 		getSearchContent: extension.tools.get("get_search_content")?.definition,
+		startSession,
 	};
 }
 
@@ -188,6 +192,55 @@ test("content retrieval errors name resultId and show corrective choices", async
 	});
 	assert.match(failedResult.content[0].text, new RegExp(`resultId "${failedFetch.details.contentResultId}"`));
 	assert.match(failedResult.content[0].text, /not-a-url/);
+});
+
+test("a successful content result is not retrievable from another cached runtime", async () => {
+	const configDir = await mkdtemp(join(tmpdir(), "pi-web-access-content-isolation-"));
+	const owner = await loadRegisteredTools([], { configDir });
+	assert.ok(owner.fetchContent);
+	mockJinaPages({
+		"http://127.0.0.1/private": {
+			title: "Private page",
+			content: "Owner-only marker.",
+		},
+	});
+	const fetched = await owner.fetchContent.execute("fetch-private", {
+		url: "http://127.0.0.1/private",
+	});
+
+	const other = await loadRegisteredTools([], { configDir, startSession: false });
+	assert.ok(other.getSearchContent);
+	const retrieved = await other.getSearchContent.execute("get-private", {
+		resultId: fetched.details.contentResultId,
+	});
+
+	assert.equal(retrieved.details.error, "Not found");
+	assert.equal(retrieved.details.resultId, fetched.details.contentResultId);
+	assert.doesNotMatch(retrieved.content[0].text, /Owner-only marker/);
+});
+
+test("starting another cached runtime does not invalidate the owner's content result", async () => {
+	const configDir = await mkdtemp(join(tmpdir(), "pi-web-access-content-lifetime-"));
+	const owner = await loadRegisteredTools([], { configDir });
+	assert.ok(owner.fetchContent);
+	assert.ok(owner.getSearchContent);
+	mockJinaPages({
+		"http://127.0.0.1/owned": {
+			title: "Owned page",
+			content: "Still-owned marker.",
+		},
+	});
+	const fetched = await owner.fetchContent.execute("fetch-owned", {
+		url: "http://127.0.0.1/owned",
+	});
+
+	await loadRegisteredTools([], { configDir });
+	const retrieved = await owner.getSearchContent.execute("get-owned", {
+		resultId: fetched.details.contentResultId,
+	});
+
+	assert.equal(retrieved.details.error, undefined);
+	assert.match(retrieved.content[0].text, /Still-owned marker/);
 });
 
 test("a failed content publication is not retrievable from another cached runtime", async () => {

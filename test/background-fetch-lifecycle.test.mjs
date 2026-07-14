@@ -82,7 +82,8 @@ async function startBackgroundSearch(runtime, callId) {
 		undefined,
 		{ hasUI: false },
 	);
-	assert.ok(result.details.fetchId, "web_search should start a background fetch");
+	assert.ok(result.details.contentResultId, "web_search should start a background fetch");
+	assert.equal("fetchId" in result.details, false);
 }
 
 test("a second cached extension runtime cannot cancel the first runtime's background fetch", async () => {
