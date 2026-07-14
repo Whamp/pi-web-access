@@ -22,7 +22,10 @@ async function loadRegisteredTools(branch = [], options = {}) {
 		options.appendEntry?.(customType, data);
 		entries.push({ customType, data });
 	};
-	runtime.sendMessage = (message, sendOptions) => sent.push({ message, options: sendOptions });
+	runtime.sendMessage = (message, sendOptions) => {
+		options.sendMessage?.(message, sendOptions);
+		sent.push({ message, options: sendOptions });
+	};
 	runtime.refreshTools = () => {};
 	runtime.getActiveTools = () => [];
 	runtime.getAllTools = () => [];
@@ -337,6 +340,127 @@ test("a failed search publication is not retrievable from the same runtime", asy
 		});
 		assert.equal(retrieved.details.error, "Not found");
 		assert.equal(retrieved.details.resultId, unpublishedResultId);
+	} finally {
+		if (previousBraveApiKey === undefined) delete process.env.BRAVE_API_KEY;
+		else process.env.BRAVE_API_KEY = previousBraveApiKey;
+	}
+});
+
+test("inline search and content results publish atomically", async () => {
+	const previousTavilyApiKey = process.env.TAVILY_API_KEY;
+	process.env.TAVILY_API_KEY = "tavily-test-key";
+	const publicationError = new Error("paired publication failed");
+	const attemptedResultIds = [];
+	let publicationAttempts = 0;
+	try {
+		const tools = await loadRegisteredTools([], {
+			appendEntry(_customType, data) {
+				publicationAttempts += 1;
+				const records = Array.isArray(data.records) ? data.records : [data];
+				attemptedResultIds.push(...records.map((record) => record.id));
+				if (publicationAttempts === 2 || Array.isArray(data.records)) throw publicationError;
+			},
+		});
+		assert.ok(tools.webSearch);
+		assert.ok(tools.getSearchContent);
+		globalThis.fetch = async (url) => {
+			assert.equal(String(url), "https://api.tavily.com/search");
+			return new Response(JSON.stringify({
+				answer: "Atomic answer",
+				results: [{
+					title: "Atomic source",
+					url: "https://example.com/atomic-inline",
+					content: "Atomic snippet",
+					raw_content: "Full content must publish with its search result.",
+				}],
+			}), { status: 200, headers: { "content-type": "application/json" } });
+		};
+
+		await assert.rejects(
+			tools.webSearch.execute(
+				"search-inline-publication",
+				{ query: "atomic inline publication", provider: "tavily", workflow: "none", includeContent: true },
+				undefined,
+				undefined,
+				{ hasUI: false },
+			),
+			publicationError,
+		);
+
+		assert.equal(publicationAttempts, 1);
+		assert.equal(tools.entries.length, 0);
+		assert.equal(attemptedResultIds.length, 2);
+		for (const resultId of attemptedResultIds) {
+			const retrieved = await tools.getSearchContent.execute(`get-${resultId}`, { resultId });
+			assert.equal(retrieved.details.error, "Not found");
+		}
+	} finally {
+		if (previousTavilyApiKey === undefined) delete process.env.TAVILY_API_KEY;
+		else process.env.TAVILY_API_KEY = previousTavilyApiKey;
+	}
+});
+
+test("a ready-notification failure does not report a successful background fetch as failed", async () => {
+	const previousBraveApiKey = process.env.BRAVE_API_KEY;
+	process.env.BRAVE_API_KEY = "brave-test-key";
+	const notificationAttempted = deferred();
+	const attemptedMessages = [];
+	try {
+		const tools = await loadRegisteredTools([], {
+			sendMessage(message) {
+				attemptedMessages.push(message);
+				if (attemptedMessages.length === 1) {
+					notificationAttempted.resolve();
+					throw new Error("ready notification transport failed");
+				}
+			},
+		});
+		assert.ok(tools.webSearch);
+		assert.ok(tools.getSearchContent);
+		globalThis.fetch = async (url) => {
+			const requested = String(url);
+			if (requested.startsWith("https://api.search.brave.com/res/v1/web/search")) {
+				return new Response(JSON.stringify({
+					web: { results: [{
+						title: "Background source",
+						url: "http://127.0.0.1/notification-source",
+						description: "Stored before notification",
+					}] },
+				}), { status: 200, headers: { "content-type": "application/json" } });
+			}
+			if (requested === "http://127.0.0.1/notification-source") {
+				return new Response(
+					`<html><head><title>Notification source</title></head><body><main><p>${"Successfully stored marker. ".repeat(40)}</p></main></body></html>`,
+					{ status: 200, headers: { "content-type": "text/html" } },
+				);
+			}
+			if (requested === "https://r.jina.ai/http://127.0.0.1/notification-source") {
+				return new Response(
+					"Title: Notification source\nURL Source: http://127.0.0.1/notification-source\nMarkdown Content:\nSuccessfully stored marker.",
+					{ status: 200, headers: { "content-type": "text/markdown" } },
+				);
+			}
+			throw new Error(`Unexpected fetch: ${requested}`);
+		};
+
+		const searched = await tools.webSearch.execute(
+			"search-notification-failure",
+			{ query: "notification failure", provider: "brave", workflow: "none", includeContent: true },
+			undefined,
+			undefined,
+			{ hasUI: false },
+		);
+		await notificationAttempted.promise;
+		await new Promise((resolve) => setImmediate(resolve));
+
+		assert.equal(attemptedMessages.length, 1);
+		assert.doesNotMatch(attemptedMessages[0].content, /Content fetch failed/);
+		assert.equal(tools.sent.length, 0);
+		const retrieved = await tools.getSearchContent.execute("get-notified-content", {
+			resultId: searched.details.contentResultId,
+		});
+		assert.equal(retrieved.details.error, undefined);
+		assert.match(retrieved.content[0].text, /Successfully stored marker/);
 	} finally {
 		if (previousBraveApiKey === undefined) delete process.env.BRAVE_API_KEY;
 		else process.env.BRAVE_API_KEY = previousBraveApiKey;

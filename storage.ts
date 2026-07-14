@@ -28,6 +28,11 @@ export interface StoredContentResultData {
 
 export type StoredResultData = StoredSearchResultData | StoredContentResultData;
 
+interface StoredResultPublicationData {
+	type: "stored-result-publication";
+	records: StoredResultData[];
+}
+
 type StoredResultPublisher = Pick<ExtensionAPI, "appendEntry">;
 
 interface ContentSelector {
@@ -101,12 +106,20 @@ function isValidStoredData(data: unknown): data is StoredResultData {
 	return false;
 }
 
+function isValidStoredResultPublication(data: unknown): data is StoredResultPublicationData {
+	return isRecord(data)
+		&& data.type === "stored-result-publication"
+		&& Array.isArray(data.records)
+		&& data.records.length > 0
+		&& data.records.every(isValidStoredData);
+}
+
+function withoutMedia(urls: ExtractedContent[]): ExtractedContent[] {
+	return urls.map(({ thumbnail: _thumbnail, frames: _frames, ...url }) => url);
+}
+
 export function createStoredResultStore() {
 	const storedResults = new Map<string, StoredResultData>();
-
-	function storeResult(id: string, data: StoredResultData): void {
-		storedResults.set(id, data);
-	}
 
 	function createSearchResult(
 		queries: QueryResultData[],
@@ -120,7 +133,7 @@ export function createStoredResultStore() {
 			queries,
 		};
 		publisher.appendEntry("web-search-results", data);
-		storeResult(id, data);
+		storedResults.set(id, data);
 		return id;
 	}
 
@@ -129,16 +142,46 @@ export function createStoredResultStore() {
 		publisher: StoredResultPublisher,
 		contentResultId = generateId(),
 	): string {
-		const storedUrls = urls.map(({ thumbnail: _thumbnail, frames: _frames, ...url }) => url);
 		const data: StoredContentResultData = {
 			id: contentResultId,
 			type: "fetch",
 			timestamp: Date.now(),
-			urls: storedUrls,
+			urls: withoutMedia(urls),
 		};
 		publisher.appendEntry("web-search-results", data);
-		storeResult(contentResultId, data);
+		storedResults.set(contentResultId, data);
 		return contentResultId;
+	}
+
+	function createSearchWithContentResults(
+		queries: QueryResultData[],
+		urls: ExtractedContent[],
+		publisher: StoredResultPublisher,
+	): { searchResultId: string; contentResultId: string } {
+		const timestamp = Date.now();
+		const searchResult: StoredSearchResultData = {
+			id: generateId(),
+			type: "search",
+			timestamp,
+			queries,
+		};
+		const contentResult: StoredContentResultData = {
+			id: generateId(),
+			type: "fetch",
+			timestamp,
+			urls: withoutMedia(urls),
+		};
+		const publication: StoredResultPublicationData = {
+			type: "stored-result-publication",
+			records: [searchResult, contentResult],
+		};
+		publisher.appendEntry("web-search-results", publication);
+		storedResults.set(searchResult.id, searchResult);
+		storedResults.set(contentResult.id, contentResult);
+		return {
+			searchResultId: searchResult.id,
+			contentResultId: contentResult.id,
+		};
 	}
 
 	function retrieveContentResult(
@@ -206,10 +249,15 @@ export function createStoredResultStore() {
 		const now = Date.now();
 
 		for (const entry of ctx.sessionManager.getBranch()) {
-			if (entry.type === "custom" && entry.customType === "web-search-results") {
-				const data = entry.data;
-				if (isValidStoredData(data) && now - data.timestamp < CACHE_TTL_MS) {
-					storedResults.set(data.id, data);
+			if (entry.type !== "custom" || entry.customType !== "web-search-results") continue;
+			const data = entry.data;
+			if (isValidStoredData(data) && now - data.timestamp < CACHE_TTL_MS) {
+				storedResults.set(data.id, data);
+				continue;
+			}
+			if (isValidStoredResultPublication(data)) {
+				for (const record of data.records) {
+					if (now - record.timestamp < CACHE_TTL_MS) storedResults.set(record.id, record);
 				}
 			}
 		}
@@ -219,6 +267,7 @@ export function createStoredResultStore() {
 		clear: () => storedResults.clear(),
 		createContentResult,
 		createSearchResult,
+		createSearchWithContentResults,
 		delete: (id: string) => storedResults.delete(id),
 		get: (id: string) => storedResults.get(id) ?? null,
 		getAll: () => Array.from(storedResults.values()),

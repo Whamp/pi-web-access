@@ -530,41 +530,54 @@ export default function (pi: ExtensionAPI) {
 		controller: AbortController,
 	): Promise<void> {
 		try {
-			const fetched = await fetchAllContent(urls, controller.signal);
-			if (!sessionActive || !pendingFetches.has(contentResultId)) return;
-			storedResultStore.createContentResult(fetched, pi, contentResultId);
-			const ok = fetched.filter(f => !f.error).length;
-			pi.sendMessage(
-				{
-					customType: "web-search-content-ready",
-					content: `Content fetched for ${ok}/${fetched.length} URLs (contentResultId: ${contentResultId}). Full page content now available. Use ${contentRetrievalCall(contentResultId)}.`,
-					display: true,
-				},
-				{ triggerTurn: true },
-			);
-		} catch (error) {
-			if (isStaleExtensionContextError(error)) {
-				sessionActive = false;
-				abortPendingFetches();
+			let fetched: ExtractedContent[];
+			try {
+				fetched = await fetchAllContent(urls, controller.signal);
+				if (!sessionActive || !pendingFetches.has(contentResultId)) return;
+				storedResultStore.createContentResult(fetched, pi, contentResultId);
+			} catch (error) {
+				if (isStaleExtensionContextError(error)) {
+					sessionActive = false;
+					abortPendingFetches();
+					return;
+				}
+				if (!sessionActive || !pendingFetches.has(contentResultId)) return;
+				const message = error instanceof Error ? error.message : String(error);
+				const isAbort = (error instanceof Error && error.name === "AbortError") || message.toLowerCase().includes("abort");
+				if (isAbort) return;
+				try {
+					pi.sendMessage(
+						{
+							customType: "web-search-error",
+							content: `Content fetch failed (contentResultId: ${contentResultId}): ${message}`,
+							display: true,
+						},
+						{ triggerTurn: false },
+					);
+				} catch {
+					// The runtime cannot safely publish further background notifications.
+					sessionActive = false;
+					abortPendingFetches();
+				}
 				return;
 			}
-			if (!sessionActive || !pendingFetches.has(contentResultId)) return;
-			const message = error instanceof Error ? error.message : String(error);
-			const isAbort = (error instanceof Error && error.name === "AbortError") || message.toLowerCase().includes("abort");
-			if (isAbort) return;
+
+			const ok = fetched.filter(f => !f.error).length;
 			try {
 				pi.sendMessage(
 					{
-						customType: "web-search-error",
-						content: `Content fetch failed (contentResultId: ${contentResultId}): ${message}`,
+						customType: "web-search-content-ready",
+						content: `Content fetched for ${ok}/${fetched.length} URLs (contentResultId: ${contentResultId}). Full page content now available. Use ${contentRetrievalCall(contentResultId)}.`,
 						display: true,
 					},
-					{ triggerTurn: false },
+					{ triggerTurn: true },
 				);
-			} catch {
-				// The runtime cannot safely publish further background notifications.
-				sessionActive = false;
-				abortPendingFetches();
+			} catch (error) {
+				if (isStaleExtensionContextError(error)) {
+					sessionActive = false;
+					abortPendingFetches();
+				}
+				// A notification transport failure does not invalidate published content.
 			}
 		} finally {
 			pendingFetches.delete(contentResultId);
@@ -838,18 +851,23 @@ export default function (pi: ExtensionAPI) {
 			}
 		}
 
-		const searchResultId = storedResultStore.createSearchResult(opts.results, pi);
 		const hasInlineReady = hasFullInlineCoverage(opts.urls, opts.inlineContent);
+		let searchResultId: string;
 		let contentResultId: string | null = null;
 		if (hasInlineReady && opts.inlineContent) {
-			contentResultId = storedResultStore.createContentResult(opts.inlineContent, pi);
+			const published = storedResultStore.createSearchWithContentResults(opts.results, opts.inlineContent, pi);
+			searchResultId = published.searchResultId;
+			contentResultId = published.contentResultId;
 			if (!hasApprovedSummary) {
 				output += `---\nFull content for ${opts.inlineContent.length} sources available (contentResultId: ${contentResultId}). Use ${contentRetrievalCall(contentResultId)}.`;
 			}
-		} else if (opts.includeContent) {
-			contentResultId = startBackgroundFetch(opts.urls);
-			if (contentResultId && !hasApprovedSummary) {
-				output += `---\nContent fetching in background (contentResultId: ${contentResultId}). Not ready yet; will notify when ready.`;
+		} else {
+			searchResultId = storedResultStore.createSearchResult(opts.results, pi);
+			if (opts.includeContent) {
+				contentResultId = startBackgroundFetch(opts.urls);
+				if (contentResultId && !hasApprovedSummary) {
+					output += `---\nContent fetching in background (contentResultId: ${contentResultId}). Not ready yet; will notify when ready.`;
+				}
 			}
 		}
 
