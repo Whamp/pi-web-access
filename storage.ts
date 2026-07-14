@@ -30,7 +30,7 @@ export type StoredResultData = StoredSearchResultData | StoredContentResultData;
 
 interface StoredResultPublicationData {
 	type: "stored-result-publication";
-	records: StoredResultData[];
+	records: [StoredSearchResultData, StoredContentResultData];
 }
 
 type StoredResultPublisher = Pick<ExtensionAPI, "appendEntry">;
@@ -107,11 +107,15 @@ function isValidStoredData(data: unknown): data is StoredResultData {
 }
 
 function isValidStoredResultPublication(data: unknown): data is StoredResultPublicationData {
-	return isRecord(data)
-		&& data.type === "stored-result-publication"
-		&& Array.isArray(data.records)
-		&& data.records.length > 0
-		&& data.records.every(isValidStoredData);
+	if (!isRecord(data) || data.type !== "stored-result-publication") return false;
+	if (!Array.isArray(data.records) || data.records.length !== 2) return false;
+	const [searchResult, contentResult] = data.records;
+	return isValidStoredData(searchResult)
+		&& searchResult.type === "search"
+		&& isValidStoredData(contentResult)
+		&& contentResult.type === "fetch"
+		&& searchResult.id !== contentResult.id
+		&& searchResult.timestamp === contentResult.timestamp;
 }
 
 function withoutMedia(urls: ExtractedContent[]): ExtractedContent[] {
@@ -120,6 +124,20 @@ function withoutMedia(urls: ExtractedContent[]): ExtractedContent[] {
 
 export function createStoredResultStore() {
 	const storedResults = new Map<string, StoredResultData>();
+	const rejectedResultIds = new Set<string>();
+
+	function publishStoredResults(
+		publisher: StoredResultPublisher,
+		data: StoredResultData | StoredResultPublicationData,
+		records: StoredResultData[],
+	): void {
+		try {
+			publisher.appendEntry("web-search-results", data);
+		} catch (error) {
+			for (const record of records) rejectedResultIds.add(record.id);
+			throw error;
+		}
+	}
 
 	function createSearchResult(
 		queries: QueryResultData[],
@@ -132,7 +150,7 @@ export function createStoredResultStore() {
 			timestamp: Date.now(),
 			queries,
 		};
-		publisher.appendEntry("web-search-results", data);
+		publishStoredResults(publisher, data, [data]);
 		storedResults.set(id, data);
 		return id;
 	}
@@ -148,7 +166,7 @@ export function createStoredResultStore() {
 			timestamp: Date.now(),
 			urls: withoutMedia(urls),
 		};
-		publisher.appendEntry("web-search-results", data);
+		publishStoredResults(publisher, data, [data]);
 		storedResults.set(contentResultId, data);
 		return contentResultId;
 	}
@@ -175,7 +193,7 @@ export function createStoredResultStore() {
 			type: "stored-result-publication",
 			records: [searchResult, contentResult],
 		};
-		publisher.appendEntry("web-search-results", publication);
+		publishStoredResults(publisher, publication, [searchResult, contentResult]);
 		storedResults.set(searchResult.id, searchResult);
 		storedResults.set(contentResult.id, contentResult);
 		return {
@@ -252,12 +270,14 @@ export function createStoredResultStore() {
 			if (entry.type !== "custom" || entry.customType !== "web-search-results") continue;
 			const data = entry.data;
 			if (isValidStoredData(data) && now - data.timestamp < CACHE_TTL_MS) {
-				storedResults.set(data.id, data);
+				if (!rejectedResultIds.has(data.id)) storedResults.set(data.id, data);
 				continue;
 			}
 			if (isValidStoredResultPublication(data)) {
-				for (const record of data.records) {
-					if (now - record.timestamp < CACHE_TTL_MS) storedResults.set(record.id, record);
+				const publicationIsFresh = now - data.records[0].timestamp < CACHE_TTL_MS;
+				const publicationWasRejected = data.records.some((record) => rejectedResultIds.has(record.id));
+				if (publicationIsFresh && !publicationWasRejected) {
+					for (const record of data.records) storedResults.set(record.id, record);
 				}
 			}
 		}

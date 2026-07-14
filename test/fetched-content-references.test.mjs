@@ -1,13 +1,16 @@
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, writeFile } from "node:fs/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 
 const codingAgentEntry = fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"));
-const loaderUrl = pathToFileURL(join(dirname(codingAgentEntry), "core/extensions/loader.js"));
+const codingAgentCore = dirname(codingAgentEntry);
+const loaderUrl = pathToFileURL(join(codingAgentCore, "core/extensions/loader.js"));
+const sessionManagerUrl = pathToFileURL(join(codingAgentCore, "core/session-manager.js"));
 const { createExtensionRuntime, loadExtensionsCached } = await import(loaderUrl.href);
+const { SessionManager } = await import(sessionManagerUrl.href);
 const extensionPath = fileURLToPath(new URL("../index.ts", import.meta.url));
 
 async function loadRegisteredTools(branch = [], options = {}) {
@@ -18,10 +21,12 @@ async function loadRegisteredTools(branch = [], options = {}) {
 	const runtime = createExtensionRuntime();
 	const entries = [];
 	const sent = [];
-	runtime.appendEntry = (customType, data) => {
-		options.appendEntry?.(customType, data);
-		entries.push({ customType, data });
-	};
+	runtime.appendEntry = options.sessionManager
+		? options.sessionManager.appendCustomEntry.bind(options.sessionManager)
+		: (customType, data) => {
+			options.appendEntry?.(customType, data);
+			entries.push({ customType, data });
+		};
 	runtime.sendMessage = (message, sendOptions) => {
 		options.sendMessage?.(message, sendOptions);
 		sent.push({ message, options: sendOptions });
@@ -46,14 +51,16 @@ async function loadRegisteredTools(branch = [], options = {}) {
 		hasUI: false,
 		mode: "print",
 		cwd: configDir,
-		sessionManager: { getBranch: () => branch },
+		sessionManager: options.sessionManager ?? { getBranch: () => branch },
 		ui: { setWidget() {}, notify() {} },
 	};
-	async function startSession() {
-		for (const handler of extension.handlers.get("session_start") ?? []) {
-			await handler({ reason: "startup" }, context);
+	async function restoreSession(eventType, event) {
+		for (const handler of extension.handlers.get(eventType) ?? []) {
+			await handler(event, context);
 		}
 	}
+	const startSession = () => restoreSession("session_start", { reason: "startup" });
+	const treeSession = () => restoreSession("session_tree", {});
 	if (options.startSession !== false) await startSession();
 
 	return {
@@ -62,8 +69,19 @@ async function loadRegisteredTools(branch = [], options = {}) {
 		getSearchContent: extension.tools.get("get_search_content")?.definition,
 		sent,
 		startSession,
+		treeSession,
 		webSearch: extension.tools.get("web_search")?.definition,
 	};
+}
+
+async function createReadOnlySessionManager(cwd) {
+	const sessionDir = await mkdtemp(join(tmpdir(), "pi-web-access-session-"));
+	const sessionManager = SessionManager.create(cwd, sessionDir);
+	sessionManager.appendMessage({ role: "assistant", content: [] });
+	const sessionFile = sessionManager.getSessionFile();
+	assert.ok(sessionFile);
+	await chmod(sessionFile, 0o400);
+	return { sessionFile, sessionManager };
 }
 
 function deferred() {
@@ -258,17 +276,10 @@ test("starting another cached runtime does not invalidate the owner's content re
 	assert.match(retrieved.content[0].text, /Still-owned marker/);
 });
 
-test("a failed content publication is not retrievable from the same runtime", async () => {
+test("a failed content publication remains unavailable after session restoration", async () => {
 	const configDir = await mkdtemp(join(tmpdir(), "pi-web-access-content-publication-"));
-	let unpublishedResultId;
-	const publicationError = new Error("This extension ctx is stale");
-	const failingRuntime = await loadRegisteredTools([], {
-		configDir,
-		appendEntry(_customType, data) {
-			unpublishedResultId = data.id;
-			throw publicationError;
-		},
-	});
+	const { sessionFile, sessionManager } = await createReadOnlySessionManager(configDir);
+	const failingRuntime = await loadRegisteredTools([], { configDir, sessionManager });
 	assert.ok(failingRuntime.fetchContent);
 	assert.ok(failingRuntime.getSearchContent);
 	mockJinaPages({
@@ -278,35 +289,37 @@ test("a failed content publication is not retrievable from the same runtime", as
 		},
 	});
 
-	await assert.rejects(
-		failingRuntime.fetchContent.execute("fetch-unpublished", { url: "http://127.0.0.1/unpublished" }),
-		publicationError,
+	try {
+		await assert.rejects(
+			failingRuntime.fetchContent.execute("fetch-unpublished", { url: "http://127.0.0.1/unpublished" }),
+			{ code: "EACCES" },
+		);
+	} finally {
+		await chmod(sessionFile, 0o600);
+	}
+	const unpublishedEntry = sessionManager.getBranch().findLast(
+		(entry) => entry.type === "custom" && entry.customType === "web-search-results",
 	);
-	assert.equal(failingRuntime.entries.length, 0);
-	assert.equal(typeof unpublishedResultId, "string");
+	assert.ok(unpublishedEntry);
+	assert.equal(typeof unpublishedEntry.data.id, "string");
+	const unpublishedResultId = unpublishedEntry.data.id;
 
+	await failingRuntime.startSession();
 	const retrieved = await failingRuntime.getSearchContent.execute("get-unpublished", {
 		resultId: unpublishedResultId,
 	});
 	assert.equal(retrieved.details.error, "Not found");
 	assert.equal(retrieved.details.resultId, unpublishedResultId);
 	assert.match(retrieved.content[0].text, new RegExp(`resultId "${unpublishedResultId}"`));
-
-	await loadRegisteredTools([], { configDir });
 });
 
-test("a failed search publication is not retrievable from the same runtime", async () => {
+test("a failed search publication remains unavailable after session restoration", async () => {
 	const previousBraveApiKey = process.env.BRAVE_API_KEY;
 	process.env.BRAVE_API_KEY = "brave-test-key";
-	let unpublishedResultId;
-	const publicationError = new Error("search publication failed");
+	const configDir = await mkdtemp(join(tmpdir(), "pi-web-access-search-publication-"));
+	const { sessionFile, sessionManager } = await createReadOnlySessionManager(configDir);
 	try {
-		const tools = await loadRegisteredTools([], {
-			appendEntry(_customType, data) {
-				unpublishedResultId = data.id;
-				throw publicationError;
-			},
-		});
+		const tools = await loadRegisteredTools([], { configDir, sessionManager });
 		assert.ok(tools.webSearch);
 		assert.ok(tools.getSearchContent);
 		globalThis.fetch = async (url) => {
@@ -323,44 +336,47 @@ test("a failed search publication is not retrievable from the same runtime", asy
 			}), { status: 200, headers: { "content-type": "application/json" } });
 		};
 
-		await assert.rejects(
-			tools.webSearch.execute(
-				"search-unpublished",
-				{ query: "atomic search publication", provider: "brave", workflow: "none" },
-				undefined,
-				undefined,
-				{ hasUI: false },
-			),
-			publicationError,
+		try {
+			await assert.rejects(
+				tools.webSearch.execute(
+					"search-unpublished",
+					{ query: "atomic search publication", provider: "brave", workflow: "none" },
+					undefined,
+					undefined,
+					{ hasUI: false },
+				),
+				{ code: "EACCES" },
+			);
+		} finally {
+			await chmod(sessionFile, 0o600);
+		}
+		const unpublishedEntry = sessionManager.getBranch().findLast(
+			(entry) => entry.type === "custom" && entry.customType === "web-search-results",
 		);
+		assert.ok(unpublishedEntry);
+		const unpublishedResultId = unpublishedEntry.data.id;
 		assert.equal(typeof unpublishedResultId, "string");
 
+		await tools.startSession();
 		const retrieved = await tools.getSearchContent.execute("get-unpublished-search", {
 			resultId: unpublishedResultId,
 		});
 		assert.equal(retrieved.details.error, "Not found");
 		assert.equal(retrieved.details.resultId, unpublishedResultId);
 	} finally {
+		await chmod(sessionFile, 0o600);
 		if (previousBraveApiKey === undefined) delete process.env.BRAVE_API_KEY;
 		else process.env.BRAVE_API_KEY = previousBraveApiKey;
 	}
 });
 
-test("inline search and content results publish atomically", async () => {
+test("a failed inline search-content publication remains atomic after session restoration", async () => {
 	const previousTavilyApiKey = process.env.TAVILY_API_KEY;
 	process.env.TAVILY_API_KEY = "tavily-test-key";
-	const publicationError = new Error("paired publication failed");
-	const attemptedResultIds = [];
-	let publicationAttempts = 0;
+	const configDir = await mkdtemp(join(tmpdir(), "pi-web-access-paired-publication-"));
+	const { sessionFile, sessionManager } = await createReadOnlySessionManager(configDir);
 	try {
-		const tools = await loadRegisteredTools([], {
-			appendEntry(_customType, data) {
-				publicationAttempts += 1;
-				const records = Array.isArray(data.records) ? data.records : [data];
-				attemptedResultIds.push(...records.map((record) => record.id));
-				if (publicationAttempts === 2 || Array.isArray(data.records)) throw publicationError;
-			},
-		});
+		const tools = await loadRegisteredTools([], { configDir, sessionManager });
 		assert.ok(tools.webSearch);
 		assert.ok(tools.getSearchContent);
 		globalThis.fetch = async (url) => {
@@ -376,25 +392,35 @@ test("inline search and content results publish atomically", async () => {
 			}), { status: 200, headers: { "content-type": "application/json" } });
 		};
 
-		await assert.rejects(
-			tools.webSearch.execute(
-				"search-inline-publication",
-				{ query: "atomic inline publication", provider: "tavily", workflow: "none", includeContent: true },
-				undefined,
-				undefined,
-				{ hasUI: false },
-			),
-			publicationError,
+		try {
+			await assert.rejects(
+				tools.webSearch.execute(
+					"search-inline-publication",
+					{ query: "atomic inline publication", provider: "tavily", workflow: "none", includeContent: true },
+					undefined,
+					undefined,
+					{ hasUI: false },
+				),
+				{ code: "EACCES" },
+			);
+		} finally {
+			await chmod(sessionFile, 0o600);
+		}
+		const unpublishedEntry = sessionManager.getBranch().findLast(
+			(entry) => entry.type === "custom" && entry.customType === "web-search-results",
 		);
-
-		assert.equal(publicationAttempts, 1);
-		assert.equal(tools.entries.length, 0);
+		assert.ok(unpublishedEntry);
+		assert.equal(unpublishedEntry.data.type, "stored-result-publication");
+		const attemptedResultIds = unpublishedEntry.data.records.map((record) => record.id);
 		assert.equal(attemptedResultIds.length, 2);
+
+		await tools.treeSession();
 		for (const resultId of attemptedResultIds) {
 			const retrieved = await tools.getSearchContent.execute(`get-${resultId}`, { resultId });
 			assert.equal(retrieved.details.error, "Not found");
 		}
 	} finally {
+		await chmod(sessionFile, 0o600);
 		if (previousTavilyApiKey === undefined) delete process.env.TAVILY_API_KEY;
 		else process.env.TAVILY_API_KEY = previousTavilyApiKey;
 	}
@@ -467,6 +493,77 @@ test("a ready-notification failure does not report a successful background fetch
 	}
 });
 
+test("a failed background content publication remains unavailable after session restoration", async () => {
+	const previousBraveApiKey = process.env.BRAVE_API_KEY;
+	process.env.BRAVE_API_KEY = "brave-test-key";
+	const configDir = await mkdtemp(join(tmpdir(), "pi-web-access-background-publication-"));
+	const sessionDir = await mkdtemp(join(tmpdir(), "pi-web-access-session-"));
+	const sessionManager = SessionManager.create(configDir, sessionDir);
+	sessionManager.appendMessage({ role: "assistant", content: [] });
+	const sessionFile = sessionManager.getSessionFile();
+	assert.ok(sessionFile);
+	const failureNotified = deferred();
+	try {
+		const tools = await loadRegisteredTools([], {
+			configDir,
+			sessionManager,
+			sendMessage(message) {
+				if (/Content fetch failed/.test(message.content)) failureNotified.resolve(message);
+			},
+		});
+		assert.ok(tools.webSearch);
+		assert.ok(tools.getSearchContent);
+		globalThis.fetch = async (url) => {
+			const requested = String(url);
+			if (requested.startsWith("https://api.search.brave.com/res/v1/web/search")) {
+				return new Response(JSON.stringify({
+					web: { results: [{
+						title: "Background publication source",
+						url: "http://127.0.0.1/background-publication",
+						description: "The search remains published if content publication fails",
+					}] },
+				}), { status: 200, headers: { "content-type": "application/json" } });
+			}
+			if (requested === "http://127.0.0.1/background-publication") {
+				await chmod(sessionFile, 0o400);
+				return new Response(
+					`<html><head><title>Background publication</title></head><body><main><p>${"Failed publication marker. ".repeat(40)}</p></main></body></html>`,
+					{ status: 200, headers: { "content-type": "text/html" } },
+				);
+			}
+			throw new Error(`Unexpected fetch: ${requested}`);
+		};
+
+		const searched = await tools.webSearch.execute(
+			"search-background-publication",
+			{ query: "background publication", provider: "brave", workflow: "none", includeContent: true },
+			undefined,
+			undefined,
+			{ hasUI: false },
+		);
+		const failureMessage = await failureNotified.promise;
+		assert.match(failureMessage.content, new RegExp(searched.details.contentResultId));
+		assert.doesNotMatch(failureMessage.content, /Full page content now available/);
+
+		await chmod(sessionFile, 0o600);
+		await tools.startSession();
+		const rejectedContent = await tools.getSearchContent.execute("get-rejected-background-content", {
+			resultId: searched.details.contentResultId,
+		});
+		assert.equal(rejectedContent.details.error, "Not found");
+		const restoredSearch = await tools.getSearchContent.execute("get-restored-background-search", {
+			resultId: searched.details.searchResultId,
+			queryIndex: 0,
+		});
+		assert.equal(restoredSearch.details.error, undefined);
+		assert.match(restoredSearch.content[0].text, /Background publication source/);
+	} finally {
+		await chmod(sessionFile, 0o600);
+		if (previousBraveApiKey === undefined) delete process.env.BRAVE_API_KEY;
+		else process.env.BRAVE_API_KEY = previousBraveApiKey;
+	}
+});
+
 test("a failed primary search publication starts no background content work", async () => {
 	const previousBraveApiKey = process.env.BRAVE_API_KEY;
 	process.env.BRAVE_API_KEY = "brave-test-key";
@@ -529,6 +626,45 @@ test("a failed primary search publication starts no background content work", as
 		contentGate.resolve();
 		if (previousBraveApiKey === undefined) delete process.env.BRAVE_API_KEY;
 		else process.env.BRAVE_API_KEY = previousBraveApiKey;
+	}
+});
+
+test("a stored search-content publication restores both records or neither", async () => {
+	const now = Date.now();
+	const searchResultId = "expired-paired-search";
+	const contentResultId = "fresh-paired-content";
+	const restored = await loadRegisteredTools([{
+		type: "custom",
+		customType: "web-search-results",
+		data: {
+			type: "stored-result-publication",
+			records: [
+				{
+					id: searchResultId,
+					type: "search",
+					timestamp: now - (60 * 60 * 1000) - 1,
+					queries: [{ query: "paired query", answer: "paired answer", results: [], error: null }],
+				},
+				{
+					id: contentResultId,
+					type: "fetch",
+					timestamp: now,
+					urls: [{
+						url: "https://example.com/paired",
+						title: "Paired content",
+						content: "This half must not restore alone.",
+						error: null,
+					}],
+				},
+			],
+		},
+	}]);
+	assert.ok(restored.getSearchContent);
+
+	for (const resultId of [searchResultId, contentResultId]) {
+		const result = await restored.getSearchContent.execute(`get-${resultId}`, { resultId });
+		assert.equal(result.details.error, "Not found");
+		assert.equal(result.details.resultId, resultId);
 	}
 });
 
