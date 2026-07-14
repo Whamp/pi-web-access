@@ -10,6 +10,8 @@ import { webSearch } from "./web-search.ts";
 import { formatSeconds, getWebSearchConfigDir, getWebSearchConfigPath } from "./utils.ts";
 import {
 	clearResults,
+	contentRetrievalCall,
+	createContentResult,
 	deleteResult,
 	generateId,
 	getAllResults,
@@ -1783,9 +1785,9 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "fetch_content",
 		label: "Fetch Content",
-		description: "Fetch URL(s) and extract readable content as markdown. Supports YouTube video transcripts (with thumbnail), GitHub repository contents, and local video files (with frame thumbnail). Video frames can be extracted via timestamp/range or sampled across the entire video with frames alone. Falls back to Gemini for pages that block bots or fail Readability extraction. For YouTube and video files: ALWAYS pass the user's specific question via the prompt parameter — this directs the AI to focus on that aspect of the video, producing much better results than a generic extraction. Content is always stored and can be retrieved with get_search_content.",
+		description: "Fetch URL(s) and extract readable content as markdown. Supports YouTube video transcripts (with thumbnail), GitHub repository contents, and local video files (with frame thumbnail). Video frames can be extracted via timestamp/range or sampled across the entire video with frames alone. Falls back to Gemini for pages that block bots or fail Readability extraction. For YouTube and video files: ALWAYS pass the user's specific question via the prompt parameter — this directs the AI to focus on that aspect of the video, producing much better results than a generic extraction. Content is always stored under contentResultId and can be retrieved with get_search_content({ resultId }).",
 		promptSnippet:
-			"Use to extract readable content from URL(s), YouTube, GitHub repos, or local videos. For video questions, pass the user's exact question in prompt.",
+			"Use to extract readable content from URL(s), YouTube, GitHub repos, or local videos. Stored fetched content is identified by contentResultId. For video questions, pass the user's exact question in prompt.",
 		parameters: Type.Object({
 			url: Type.Optional(Type.String({ description: "Single URL to fetch" })),
 			urls: Type.Optional(Type.Array(Type.String(), { description: "Multiple URLs (parallel)" })),
@@ -1826,24 +1828,15 @@ export default function (pi: ExtensionAPI) {
 			const successful = fetchResults.filter((r) => !r.error).length;
 			const totalChars = fetchResults.reduce((sum, r) => sum + r.content.length, 0);
 
-			// ALWAYS store results (even for single URL)
-			const responseId = generateId();
-			const data: StoredSearchData = {
-				id: responseId,
-				type: "fetch",
-				timestamp: Date.now(),
-				urls: stripThumbnails(fetchResults),
-			};
-			storeResult(responseId, data);
-			pi.appendEntry("web-search-results", data);
+			const { contentResultId } = createContentResult(fetchResults, pi);
 
-			// Single URL: return content directly (possibly truncated) with responseId
+			// Single URL: return content directly (possibly truncated) with contentResultId
 			if (urlList.length === 1) {
 				const result = fetchResults[0];
 				if (result.error) {
 					return {
 						content: [{ type: "text", text: `Error: ${result.error}` }],
-						details: { urls: urlList, urlCount: 1, successful: 0, error: result.error, responseId, prompt: params.prompt, timestamp: params.timestamp, frames: params.frames },
+						details: { urls: urlList, urlCount: 1, successful: 0, error: result.error, contentResultId, prompt: params.prompt, timestamp: params.timestamp, frames: params.frames },
 					};
 				}
 
@@ -1855,7 +1848,7 @@ export default function (pi: ExtensionAPI) {
 
 				if (truncated) {
 					output += `\n\n---\nShowing ${MAX_INLINE_CONTENT} of ${fullLength} chars. ` +
-						`Use get_search_content({ responseId: "${responseId}", urlIndex: 0 }) for full content.`;
+						`Use ${contentRetrievalCall(contentResultId)} for full content.`;
 				}
 
 				const content: Array<{ type: string; text?: string; data?: string; mimeType?: string }> = [];
@@ -1878,7 +1871,7 @@ export default function (pi: ExtensionAPI) {
 						successful: 1,
 						totalChars: fullLength,
 						title: result.title,
-						responseId,
+						contentResultId,
 						truncated,
 						hasImage: imageCount > 0,
 						imageCount,
@@ -1890,7 +1883,7 @@ export default function (pi: ExtensionAPI) {
 				};
 			}
 
-			// Multi-URL: existing behavior (summary + responseId)
+			// Multi-URL: return a summary plus the stored content reference.
 			let output = "## Fetched URLs\n\n";
 			for (const { url, title, content, error } of fetchResults) {
 				if (error) {
@@ -1899,11 +1892,11 @@ export default function (pi: ExtensionAPI) {
 					output += `- ${title || url} (${content.length} chars)\n`;
 				}
 			}
-			output += `\n---\nUse get_search_content({ responseId: "${responseId}", urlIndex: 0 }) to retrieve full content.`;
+			output += `\n---\nUse ${contentRetrievalCall(contentResultId)} to retrieve full content.`;
 
 			return {
 				content: [{ type: "text", text: output }],
-				details: { urls: urlList, urlCount: urlList.length, successful, totalChars, responseId },
+				details: { urls: urlList, urlCount: urlList.length, successful, totalChars, contentResultId },
 			};
 		},
 
@@ -1951,7 +1944,7 @@ export default function (pi: ExtensionAPI) {
 				error?: string;
 				title?: string;
 				truncated?: boolean;
-				responseId?: string;
+				contentResultId?: string;
 				phase?: string;
 				progress?: number;
 				hasImage?: boolean;
@@ -1974,7 +1967,7 @@ export default function (pi: ExtensionAPI) {
 				if (typeof fd.urlCount === "number" || typeof fd.successful === "number") {
 					extras.push(`urls: ${fd.successful ?? 0}/${fd.urlCount ?? 0} succeeded`);
 				}
-				if (fd.responseId) extras.push(`response id: ${fd.responseId}`);
+				if (fd.contentResultId) extras.push(`content result id: ${fd.contentResultId}`);
 				if (fd.urls && fd.urls.length > 0) {
 					for (const u of fd.urls.slice(0, 8)) extras.push(`  \u25b8 ${u}`);
 					if (fd.urls.length > 8) extras.push(`  ... and ${fd.urls.length - 8} more`);
@@ -2034,11 +2027,11 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "get_search_content",
 		label: "Get Search Content",
-		description: "Retrieve full content from a previous web_search or fetch_content call.",
+		description: "Retrieve full content from a previous web_search or fetch_content call by passing its stored reference as resultId.",
 		promptSnippet:
-			"Use after web_search/fetch_content when full stored content is needed via responseId plus query/url selectors.",
+			"Use after web_search/fetch_content when full stored content is needed via resultId plus query/url selectors.",
 		parameters: Type.Object({
-			responseId: Type.String({ description: "The responseId from web_search or fetch_content" }),
+			resultId: Type.String({ description: "The stored result reference from web_search or fetch_content" }),
 			query: Type.Optional(Type.String({ description: "Get content for this query (web_search)" })),
 			queryIndex: Type.Optional(Type.Number({ description: "Get content for query at index" })),
 			url: Type.Optional(Type.String({ description: "Get content for this URL" })),
@@ -2046,11 +2039,11 @@ export default function (pi: ExtensionAPI) {
 		}),
 
 		async execute(_toolCallId, params) {
-			const data = getResult(params.responseId);
+			const data = getResult(params.resultId);
 			if (!data) {
 				return {
-					content: [{ type: "text", text: `Error: No stored results for "${params.responseId}"` }],
-					details: { error: "Not found", responseId: params.responseId },
+					content: [{ type: "text", text: `Error: No stored result for resultId "${params.resultId}".` }],
+					details: { error: "Not found", resultId: params.resultId },
 				};
 			}
 
@@ -2097,42 +2090,44 @@ export default function (pi: ExtensionAPI) {
 
 			if (data.type === "fetch" && data.urls) {
 				let urlData: ExtractedContent | undefined;
+				const urls = data.urls.map((item) => item.url);
+				const available = urls.map((item, index) => `${index}: ${item}`).join("\n  ");
 
 				if (params.url !== undefined) {
-					urlData = data.urls.find((u) => u.url === params.url);
+					urlData = data.urls.find((item) => item.url === params.url);
 					if (!urlData) {
-						const available = data.urls.map((u) => u.url).join("\n  ");
 						return {
-							content: [{ type: "text", text: `URL not found. Available:\n  ${available}` }],
-							details: { error: "URL not found" },
+							content: [{ type: "text", text: `URL "${params.url}" not found for resultId "${params.resultId}". Available:\n  ${available}` }],
+							details: { error: "URL not found", resultId: params.resultId, urls },
 						};
 					}
 				} else if (params.urlIndex !== undefined) {
 					urlData = data.urls[params.urlIndex];
 					if (!urlData) {
 						return {
-							content: [{ type: "text", text: `Index ${params.urlIndex} out of range (0-${data.urls.length - 1})` }],
-							details: { error: "Index out of range" },
+							content: [{ type: "text", text: `urlIndex ${params.urlIndex} is out of range for resultId "${params.resultId}". Available:\n  ${available}` }],
+							details: { error: "Index out of range", resultId: params.resultId, urls },
 						};
 					}
+				} else if (data.urls.length === 1) {
+					urlData = data.urls[0];
 				} else {
-					const available = data.urls.map((u, i) => `${i}: ${u.url}`).join("\n  ");
 					return {
-						content: [{ type: "text", text: `Specify url or urlIndex. Available:\n  ${available}` }],
-						details: { error: "No URL specified" },
+						content: [{ type: "text", text: `Choose a URL with url or urlIndex for resultId "${params.resultId}". Available:\n  ${available}` }],
+						details: { resultId: params.resultId, urls },
 					};
 				}
 
 				if (urlData.error) {
 					return {
-						content: [{ type: "text", text: `Error for ${urlData.url}: ${urlData.error}` }],
-						details: { error: urlData.error, url: urlData.url },
+						content: [{ type: "text", text: `Stored content failed for resultId "${params.resultId}" at ${urlData.url}: ${urlData.error}` }],
+						details: { error: urlData.error, resultId: params.resultId, url: urlData.url },
 					};
 				}
 
 				return {
 					content: [{ type: "text", text: `# ${urlData.title}\n\n${urlData.content}` }],
-					details: { url: urlData.url, title: urlData.title, contentLength: urlData.content.length },
+					details: { resultId: params.resultId, url: urlData.url, title: urlData.title, contentLength: urlData.content.length },
 				};
 			}
 
@@ -2143,8 +2138,8 @@ export default function (pi: ExtensionAPI) {
 		},
 
 		renderCall(args, theme) {
-			const { responseId, query, queryIndex, url, urlIndex } = args as {
-				responseId: string;
+			const { resultId, query, queryIndex, url, urlIndex } = args as {
+				resultId: string;
 				query?: string;
 				queryIndex?: number;
 				url?: string;
@@ -2155,12 +2150,13 @@ export default function (pi: ExtensionAPI) {
 			else if (queryIndex !== undefined) target = `queryIndex=${queryIndex}`;
 			else if (url) target = url.length > 30 ? url.slice(0, 27) + "..." : url;
 			else if (urlIndex !== undefined) target = `urlIndex=${urlIndex}`;
-			return new Text(theme.fg("toolTitle", theme.bold("get_content ")) + theme.fg("accent", target || responseId.slice(0, 8)), 0, 0);
+			return new Text(theme.fg("toolTitle", theme.bold("get_content ")) + theme.fg("accent", target || resultId.slice(0, 8)), 0, 0);
 		},
 
 		renderResult(result, { expanded }, theme) {
 			const details = result.details as {
 				error?: string;
+				resultId?: string;
 				query?: string;
 				url?: string;
 				title?: string;
@@ -2170,6 +2166,7 @@ export default function (pi: ExtensionAPI) {
 
 			if (details?.error) {
 				const extras: string[] = [];
+				if (details.resultId) extras.push(`result id: ${details.resultId}`);
 				if (details.query) extras.push(`query: ${details.query}`);
 				if (details.url) extras.push(`url: ${details.url}`);
 				else if (details.title) extras.push(`resource: ${details.title}`);

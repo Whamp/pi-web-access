@@ -1,4 +1,4 @@
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { ExtractedContent } from "./extract.ts";
 import type { SearchResult } from "./search-provider.ts";
 
@@ -28,6 +28,27 @@ export function generateId(): string {
 
 export function storeResult(id: string, data: StoredSearchData): void {
 	storedResults.set(id, data);
+}
+
+export function createContentResult(
+	urls: ExtractedContent[],
+	publisher: Pick<ExtensionAPI, "appendEntry">,
+): { contentResultId: string; data: StoredSearchData } {
+	const contentResultId = generateId();
+	const storedUrls = urls.map(({ thumbnail: _thumbnail, frames: _frames, ...url }) => url);
+	const data: StoredSearchData = {
+		id: contentResultId,
+		type: "fetch",
+		timestamp: Date.now(),
+		urls: storedUrls,
+	};
+	storeResult(contentResultId, data);
+	publisher.appendEntry("web-search-results", data);
+	return { contentResultId, data };
+}
+
+export function contentRetrievalCall(contentResultId: string): string {
+	return `get_search_content({ resultId: "${contentResultId}" })`;
 }
 
 export function getResult(id: string): StoredSearchData | null {

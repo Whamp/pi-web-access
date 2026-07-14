@@ -151,10 +151,13 @@ fetch_content({ url: "/path/to/video.mp4", frames: 6 })
 Retrieve full content stored by an earlier search or fetch.
 
 ```typescript
-get_search_content({ responseId: "abc123", urlIndex: 0 })
-get_search_content({ responseId: "abc123", url: "https://example.com" })
-get_search_content({ responseId: "abc123", query: "original query" })
+get_search_content({ resultId: "abc123" })
+get_search_content({ resultId: "abc123", urlIndex: 0 })
+get_search_content({ resultId: "abc123", url: "https://example.com" })
+get_search_content({ resultId: "abc123", query: "original query" })
 ```
+
+`fetch_content` returns stored fetched content under `contentResultId`; pass that value as `resultId`. A single stored page needs no selector. A multi-page result lists its indexed URLs when no selector is supplied.
 
 Large content is truncated in the immediate tool response but remains available through this tool.
 
