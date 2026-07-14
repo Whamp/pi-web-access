@@ -4,6 +4,20 @@ import { test } from "node:test";
 
 const extractorUrl = new URL("../pdf-extract.ts", import.meta.url).href;
 
+test("PDF cancellation destroys its loading task before settlement", () => {
+  const child = spawnSync(process.execPath, ["--input-type=module"], {
+    input: buildCancellationChildScript(extractorUrl),
+    encoding: "utf8",
+    maxBuffer: 2 * 1024 * 1024,
+  });
+
+  assert.equal(
+    child.status,
+    0,
+    "PDF cancellation did not clean up its loading task. stderr summary:\n" + errorSummary(child.stderr),
+  );
+});
+
 test("extractPDFToMarkdown works on Node 22 without native Promise.try", () => {
   const child = spawnSync(process.execPath, ["--input-type=module"], {
     input: buildChildScript(extractorUrl),
@@ -19,6 +33,39 @@ test("extractPDFToMarkdown works on Node 22 without native Promise.try", () => {
 
   assert.match(child.stdout, /Hello PDF/);
 });
+
+function buildCancellationChildScript(moduleUrl) {
+  return `
+    import assert from "node:assert/strict";
+    import { definePDFJSModule } from "unpdf";
+
+    let rejectLoading;
+    let destroyed = false;
+    const loading = new Promise((_resolve, reject) => { rejectLoading = reject; });
+    await definePDFJSModule(async () => ({
+      getDocument: () => ({
+        promise: loading,
+        async destroy() {
+          destroyed = true;
+          rejectLoading(new DOMException("PDF loading cancelled", "AbortError"));
+        },
+      }),
+    }));
+
+    const { extractPDFToMarkdown } = await import(${JSON.stringify(moduleUrl)});
+    const controller = new AbortController();
+    const callerReason = new Error("cancel PDF");
+    const extraction = extractPDFToMarkdown(
+      new Uint8Array([37, 80, 68, 70]).buffer,
+      "https://example.test/slow.pdf",
+      { signal: controller.signal },
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    controller.abort(callerReason);
+    await assert.rejects(extraction, (error) => error === callerReason);
+    assert.equal(destroyed, true, "loading task was not destroyed");
+  `;
+}
 
 function buildChildScript(moduleUrl) {
   return `

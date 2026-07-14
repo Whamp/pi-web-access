@@ -115,7 +115,8 @@ function extractAccountId(token: string): string | undefined {
 	return typeof id === "string" && id.trim().length > 0 ? id.trim() : undefined;
 }
 
-export async function resolveOpenAIAuth(ctx?: ExtensionContext): Promise<OpenAIAuth | undefined> {
+export async function resolveOpenAIAuth(ctx?: ExtensionContext, signal?: AbortSignal): Promise<OpenAIAuth | undefined> {
+	signal?.throwIfAborted();
 	if (ctx) {
 		const { getModel } = await import("@earendil-works/pi-ai/compat");
 		for (const candidate of AUTH_MODEL_CANDIDATES) {
@@ -124,6 +125,7 @@ export async function resolveOpenAIAuth(ctx?: ExtensionContext): Promise<OpenAIA
 				if (!model) continue;
 				try {
 					const resolved = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+					signal?.throwIfAborted();
 					if (resolved.ok && resolved.apiKey) {
 						return {
 							provider: candidate.provider,
@@ -133,6 +135,7 @@ export async function resolveOpenAIAuth(ctx?: ExtensionContext): Promise<OpenAIA
 						};
 					}
 				} catch {
+					signal?.throwIfAborted();
 				}
 			}
 		}
@@ -144,8 +147,8 @@ export async function resolveOpenAIAuth(ctx?: ExtensionContext): Promise<OpenAIA
 		: undefined;
 }
 
-export async function isOpenAISearchAvailable(ctx?: ExtensionContext): Promise<boolean> {
-	return !!(await resolveOpenAIAuth(ctx));
+export async function isOpenAISearchAvailable(ctx?: ExtensionContext, signal?: AbortSignal): Promise<boolean> {
+	return !!(await resolveOpenAIAuth(ctx, signal));
 }
 
 function buildInstructions(options: SearchOptions): string {
@@ -324,7 +327,7 @@ export async function searchWithOpenAI(
 	options: SearchOptions = {},
 	ctx?: ExtensionContext,
 ): Promise<SearchResponse> {
-	const auth = await resolveOpenAIAuth(ctx);
+	const auth = await resolveOpenAIAuth(ctx, options.signal);
 	if (!auth) {
 		throw new Error(
 			"OpenAI web search unavailable. Either:\n" +
@@ -401,7 +404,7 @@ export async function searchWithOpenAI(
 export const openAISearchProvider: SearchProviderAdapter<"openai"> = {
 	name: "openai",
 	label: "OpenAI",
-	eligibility: async ({ extensionContext }) => await isOpenAISearchAvailable(extensionContext)
+	eligibility: async ({ extensionContext, signal }) => await isOpenAISearchAvailable(extensionContext, signal)
 		? { eligible: true }
 		: { eligible: false, reason: "OpenAI web search credentials are not configured." },
 	search: ({ query, options }) => searchWithOpenAI(query, options, options.extensionContext),

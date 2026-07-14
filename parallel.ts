@@ -1,6 +1,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import { activityMonitor } from "./activity.ts";
+import { settleWithAbort } from "./abort.ts";
 import type { ExtractedContent, ExtractOptions } from "./extract.ts";
+import { abandonResponseBody, readResponseBytes } from "./response-body.ts";
 import type { SearchOptions, SearchProviderAdapter, SearchResponse } from "./search-provider.ts";
 import { getWebSearchConfigPath } from "./utils.ts";
 
@@ -325,36 +327,43 @@ async function parallelFetch(
 ): Promise<Record<string, unknown>> {
 	const apiKey = getApiKey();
 	const activityId = activityMonitor.logStart(activityContext(url, body));
+	const operationSignal = requestSignal(signal);
 	let response: Response;
 	try {
-		response = await fetch(url, {
-			method: "POST",
-			headers: {
-				"x-api-key": apiKey,
-				"Content-Type": "application/json",
-			},
-			body: JSON.stringify(body),
-			signal: requestSignal(signal),
-		});
+		response = await settleWithAbort(
+			() => fetch(url, {
+				method: "POST",
+				headers: {
+					"x-api-key": apiKey,
+					"Content-Type": "application/json",
+				},
+				body: JSON.stringify(body),
+				signal: operationSignal,
+			}),
+			operationSignal,
+			lateResponse => abandonResponseBody(lateResponse, "Parallel response arrived after cancellation"),
+		);
 	} catch (err) {
 		const message = errorMessage(err);
-		if (message.toLowerCase().includes("abort")) activityMonitor.logComplete(activityId, 0);
+		if (operationSignal.aborted || message.toLowerCase().includes("abort")) activityMonitor.logComplete(activityId, 0);
 		else activityMonitor.logError(activityId, message);
 		throw err;
 	}
 
 	if (!response.ok) {
 		activityMonitor.logComplete(activityId, response.status);
-		const errorText = await response.text();
+		const errorText = new TextDecoder().decode(await readResponseBytes(response, operationSignal));
 		throw new Error(`Parallel API error ${response.status}: ${errorText.slice(0, 300)}`);
 	}
 
 	try {
-		const data = await response.json() as Record<string, unknown>;
+		const text = new TextDecoder().decode(await readResponseBytes(response, operationSignal));
+		const data = JSON.parse(text) as Record<string, unknown>;
 		activityMonitor.logComplete(activityId, response.status);
 		return data;
 	} catch (err) {
-		activityMonitor.logComplete(activityId, response.status);
+		activityMonitor.logComplete(activityId, operationSignal.aborted ? 0 : response.status);
+		if (operationSignal.aborted) throw err;
 		throw new Error(`Parallel API returned invalid JSON: ${errorMessage(err)}`);
 	}
 }

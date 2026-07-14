@@ -86,27 +86,6 @@ function mockExaSearch() {
 	};
 }
 
-function mockBraveSearchWithPendingContent() {
-	globalThis.fetch = async (url) => {
-		const requested = String(url);
-		if (requested.startsWith("https://api.search.brave.com/res/v1/web/search")) {
-			return new Response(JSON.stringify({
-				web: {
-					results: [{
-						title: "Pending source",
-						url: "http://127.0.0.1/pending-source",
-						description: "Search result awaiting fetched source content",
-					}],
-				},
-			}), { status: 200, headers: { "content-type": "application/json" } });
-		}
-		if (requested === "https://r.jina.ai/http://127.0.0.1/pending-source") {
-			return new Promise(() => {});
-		}
-		throw new Error(`Unexpected fetch: ${requested}`);
-	};
-}
-
 async function search(tools, params) {
 	return tools.webSearch.execute("search-call", { provider: "exa", workflow: "none", ...params }, undefined, undefined, tools.context);
 }
@@ -121,15 +100,6 @@ function renderText(component) {
 	return component.render(160).join("\n").trimEnd();
 }
 
-async function waitForValue(read) {
-	for (let attempt = 0; attempt < 200; attempt += 1) {
-		const value = read();
-		if (value !== undefined) return value;
-		await new Promise((resolve) => setTimeout(resolve, 2));
-	}
-	assert.fail("condition was not met before timeout");
-}
-
 test("a registered single-query web search exposes searchResultId and opens with resultId alone", async () => {
 	const tools = await loadRegisteredTools();
 	mockExaSearch();
@@ -139,8 +109,9 @@ test("a registered single-query web search exposes searchResultId and opens with
 	assert.equal(typeof searched.details.searchResultId, "string");
 	assert.equal(searched.details.contentResultId, null);
 	assert.deepEqual(Object.keys(searched.details).sort(), [
+		"contentErrors",
+		"contentReady",
 		"contentResultId",
-		"fetchUrls",
 		"includeContent",
 		"queries",
 		"queryCount",
@@ -212,50 +183,23 @@ test("an automatic summary gives distinct retrieval calls for omitted search res
 	assert.match(contentResult.content[0].text, /Complete source content for condensed query/);
 });
 
-test("an automatic summary identifies pending source content separately from omitted search results", async () => {
-	const tools = await loadRegisteredTools();
-	mockBraveSearchWithPendingContent();
-	const summarized = await tools.webSearch.execute(
-		"auto-summary-pending-content",
-		{ query: "pending content query", provider: "brave", workflow: "auto-summary", includeContent: true },
-		undefined,
-		undefined,
-		tools.context,
-	);
-	const { searchResultId, contentResultId } = summarized.details;
-
-	assert.equal(typeof searchResultId, "string");
-	assert.equal(typeof contentResultId, "string");
-	assert.match(summarized.content[0].text, new RegExp(`get_search_content\\(\\{ resultId: "${searchResultId}" \\}\\)`));
-	assert.match(summarized.content[0].text, new RegExp(`Content fetching in background \\(contentResultId: ${contentResultId}\\)`));
-	assert.match(summarized.content[0].text, /Not ready yet; will notify when ready/);
-});
-
-test("a curated summary gives a model-visible retrieval call for omitted search results", async () => {
+test("legacy summary-review keeps stored result retrieval available without opening the curator", async () => {
 	const tools = await loadRegisteredTools([], { hasUI: true });
 	mockExaSearch();
-	const updates = [];
-	const pending = tools.webSearch.execute(
-		"curated-summary",
-		{ query: "curated query", provider: "exa", workflow: "summary-review" },
+	const result = await tools.webSearch.execute(
+		"legacy-summary-review",
+		{ query: "legacy workflow query", provider: "exa", workflow: "summary-review" },
 		undefined,
-		(update) => updates.push(update),
+		undefined,
 		tools.context,
 	);
-	const curatorUrl = await waitForValue(() => updates.find((update) => update.details?.curatorUrl)?.details.curatorUrl);
-	const session = new URL(curatorUrl).searchParams.get("session");
-	assert.ok(session);
-	const submitted = await nativeFetch(new URL("/submit", curatorUrl), {
-		method: "POST",
-		headers: { "content-type": "application/json" },
-		body: JSON.stringify({ token: session, selected: [0], summary: "Approved concise summary." }),
-	});
-	assert.equal(submitted.status, 200);
 
-	const curated = await pending;
-	assert.equal(curated.details.curated, true);
-	assert.match(curated.content[0].text, /Approved concise summary/);
-	assert.match(curated.content[0].text, new RegExp(`get_search_content\\(\\{ resultId: "${curated.details.searchResultId}" \\}\\)`));
+	assert.match(result.content[0].text, /Compatibility warning/);
+	assert.equal(result.details.curated, undefined);
+	const retrieved = await tools.getSearchContent.execute("legacy-retrieve", {
+		resultId: result.details.searchResultId,
+	});
+	assert.match(retrieved.content[0].text, /Full answer for legacy workflow query/);
 });
 
 test("restored Web search records retain single-query retrieval parity", async () => {

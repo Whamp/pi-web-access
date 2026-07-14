@@ -1,9 +1,26 @@
 import assert from "node:assert/strict";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import { fetchRemoteUrl, validateRemoteUrl } from "../ssrf-protection.ts";
 
 const publicLookup = async () => [{ address: "93.184.216.34", family: 4 }];
+
+async function settlesWithin(promise, label) {
+	let timeoutId;
+	try {
+		return await Promise.race([
+			promise,
+			new Promise((_resolve, reject) => {
+				timeoutId = setTimeout(() => reject(new Error(`${label} did not settle promptly`)), 100);
+			}),
+		]);
+	} finally {
+		clearTimeout(timeoutId);
+	}
+}
 
 async function rejectsInternal(url) {
 	await assert.rejects(
@@ -50,10 +67,106 @@ test("validateRemoteUrl blocks hostnames that resolve to private addresses", asy
 	);
 });
 
+test("validateRemoteUrl blocks private OS resolver aliases used by the transport", async () => {
+	const directory = await mkdtemp(join(tmpdir(), "pi-web-access-host-alias-"));
+	const aliases = join(directory, "aliases");
+	await writeFile(aliases, "piwassrfalias localhost\n");
+	const originalAliases = process.env.HOSTALIASES;
+	process.env.HOSTALIASES = aliases;
+	try {
+		await assert.rejects(
+			validateRemoteUrl("http://piwassrfalias/"),
+			/Blocked internal address for piwassrfalias/,
+		);
+	} finally {
+		if (originalAliases === undefined) delete process.env.HOSTALIASES;
+		else process.env.HOSTALIASES = originalAliases;
+	}
+});
+
 test("validateRemoteUrl permits public HTTP and HTTPS targets", async () => {
 	assert.equal((await validateRemoteUrl("https://example.com/path", { lookup: publicLookup })).hostname, "example.com");
 	assert.equal((await validateRemoteUrl("http://93.184.216.34/")).hostname, "93.184.216.34");
 	assert.equal((await validateRemoteUrl("https://[2606:2800:220:1:248:1893:25c8:1946]/")).hostname, "[2606:2800:220:1:248:1893:25c8:1946]");
+});
+
+test("validateRemoteUrl waits for DNS cleanup on cancellation", async () => {
+	const controller = new AbortController();
+	const reason = new DOMException("cancelled", "AbortError");
+	let cleanupComplete = false;
+	const validation = validateRemoteUrl("https://example.test/", {
+		lookup: (_hostname, options) => new Promise((_resolve, reject) => {
+			options?.signal?.addEventListener("abort", () => {
+				setImmediate(() => {
+					cleanupComplete = true;
+					reject(options.signal.reason);
+				});
+			}, { once: true });
+		}),
+		signal: controller.signal,
+	});
+	controller.abort(reason);
+	await assert.rejects(settlesWithin(validation, "DNS cancellation"), (error) => error === reason);
+	const cleanupCompleteAtSettlement = cleanupComplete;
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(cleanupCompleteAtSettlement, true, "DNS cleanup must finish before validation settles");
+});
+
+test("fetchRemoteUrl closes a response that arrives after cancellation", async () => {
+	const controller = new AbortController();
+	const reason = new Error("cancel late response");
+	let resolveFetch;
+	let bodyCancelled = false;
+	const delayedResponse = new Promise((resolve) => {
+		resolveFetch = resolve;
+	});
+	const request = fetchRemoteUrl(
+		"https://example.com/",
+		{ signal: controller.signal },
+		{ lookup: publicLookup, fetch: () => delayedResponse },
+	);
+	await new Promise((resolve) => setImmediate(resolve));
+	controller.abort(reason);
+	await assert.rejects(settlesWithin(request, "late response cancellation"), (error) => error === reason);
+
+	resolveFetch(new Response(new ReadableStream({
+		start(streamController) {
+			streamController.enqueue(new TextEncoder().encode("late response"));
+		},
+		cancel() {
+			bodyCancelled = true;
+		},
+	}), { status: 200 }));
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(bodyCancelled, true, "the late response body must be closed");
+});
+
+test("fetchRemoteUrl closes a response when the transport aborts synchronously", async () => {
+	const controller = new AbortController();
+	const reason = new Error("synchronous transport cancellation");
+	let bodyCancelled = false;
+	const response = new Response(new ReadableStream({
+		start(streamController) {
+			streamController.enqueue(new TextEncoder().encode("late response"));
+		},
+		cancel() {
+			bodyCancelled = true;
+		},
+	}), { status: 200 });
+	const request = fetchRemoteUrl(
+		"https://example.com/",
+		{ signal: controller.signal },
+		{
+			lookup: publicLookup,
+			fetch: () => {
+				controller.abort(reason);
+				return Promise.resolve(response);
+			},
+		},
+	);
+	await assert.rejects(settlesWithin(request, "synchronous transport cancellation"), (error) => error === reason);
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(bodyCancelled, true, "the synchronously returned response body must be closed");
 });
 
 test("fetchRemoteUrl validates redirect targets before following", async () => {
@@ -75,14 +188,24 @@ test("fetchRemoteUrl validates redirect targets before following", async () => {
 
 test("fetchRemoteUrl follows validated public redirects manually", async () => {
 	const requested = [];
+	let redirectBodyCancelled = false;
 	const fetchImpl = async (url) => {
 		requested.push(url.toString());
 		if (requested.length === 1) {
-			return new Response("", {
+			const body = new ReadableStream({
+				start(controller) {
+					controller.enqueue(new TextEncoder().encode("redirect"));
+				},
+				cancel() {
+					redirectBodyCancelled = true;
+				},
+			});
+			return new Response(body, {
 				status: 301,
 				headers: { location: "/next" },
 			});
 		}
+		assert.equal(redirectBodyCancelled, true, "redirect body must close before the next request");
 		return new Response("ok", { status: 200 });
 	};
 

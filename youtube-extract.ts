@@ -1,10 +1,12 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { activityMonitor } from "./activity.ts";
+import { settleWithAbort } from "./abort.ts";
 import { isGeminiWebAvailable, queryWithCookies } from "./gemini-web.ts";
 import { isGeminiApiAvailable, queryGeminiApiWithVideo } from "./gemini-api.ts";
 import { isPerplexityAvailable, searchWithPerplexity } from "./perplexity.ts";
 import { extractHeadingTitle, type ExtractedContent, type FrameResult, type VideoFrame } from "./extract.ts";
+import { abandonResponseBody, discardResponseBody, readResponseBytes } from "./response-body.ts";
 import { formatSeconds, readExecError, isTimeoutError, trimErrorText, mapFfmpegError, getWebSearchConfigPath } from "./utils.ts";
 
 const CONFIG_PATH = getWebSearchConfigPath();
@@ -117,7 +119,11 @@ export async function extractYouTube(
 	if (result) {
 		result.url = url;
 		if (!result.error && videoId) {
-			const thumb = await fetchYouTubeThumbnail(videoId);
+			const thumb = await fetchYouTubeThumbnail(videoId, signal);
+			if (signal?.aborted) {
+				activityMonitor.logComplete(activityId, 0);
+				return null;
+			}
 			if (thumb) result.thumbnail = thumb;
 		}
 		activityMonitor.logComplete(activityId, result.error ? 0 : 200);
@@ -210,13 +216,23 @@ export async function extractYouTubeFrames(
 	return { frames, duration: info.duration, error: frames.length === 0 && errorResult ? errorResult.error : null };
 }
 
-export async function fetchYouTubeThumbnail(videoId: string): Promise<{ data: string; mimeType: string } | null> {
+export async function fetchYouTubeThumbnail(
+	videoId: string,
+	signal?: AbortSignal,
+): Promise<{ data: string; mimeType: string } | null> {
+	const timeoutSignal = AbortSignal.timeout(5000);
+	const requestSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 	try {
-		const res = await fetch(`https://img.youtube.com/vi/${videoId}/hqdefault.jpg`, {
-			signal: AbortSignal.timeout(5000),
-		});
-		if (!res.ok) return null;
-		const buffer = Buffer.from(await res.arrayBuffer());
+		const res = await settleWithAbort(
+			() => fetch(`https://img.youtube.com/vi/${videoId}/hqdefault.jpg`, { signal: requestSignal }),
+			requestSignal,
+			lateResponse => abandonResponseBody(lateResponse, "YouTube thumbnail arrived after cancellation"),
+		);
+		if (!res.ok) {
+			await discardResponseBody(res, "YouTube thumbnail request failed", requestSignal);
+			return null;
+		}
+		const buffer = Buffer.from(await readResponseBytes(res, requestSignal));
 		if (buffer.length === 0) return null;
 		return { data: buffer.toString("base64"), mimeType: "image/jpeg" };
 	} catch {
