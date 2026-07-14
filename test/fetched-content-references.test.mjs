@@ -276,7 +276,7 @@ test("starting another cached runtime does not invalidate the owner's content re
 	assert.match(retrieved.content[0].text, /Still-owned marker/);
 });
 
-test("a failed content publication remains unavailable after session restoration", async () => {
+test("a failed content publication remains unavailable to a second runtime", async () => {
 	const configDir = await mkdtemp(join(tmpdir(), "pi-web-access-content-publication-"));
 	const { sessionFile, sessionManager } = await createReadOnlySessionManager(configDir);
 	const failingRuntime = await loadRegisteredTools([], { configDir, sessionManager });
@@ -304,8 +304,9 @@ test("a failed content publication remains unavailable after session restoration
 	assert.equal(typeof unpublishedEntry.data.id, "string");
 	const unpublishedResultId = unpublishedEntry.data.id;
 
-	await failingRuntime.startSession();
-	const retrieved = await failingRuntime.getSearchContent.execute("get-unpublished", {
+	const restoredRuntime = await loadRegisteredTools([], { configDir, sessionManager });
+	assert.ok(restoredRuntime.getSearchContent);
+	const retrieved = await restoredRuntime.getSearchContent.execute("get-unpublished", {
 		resultId: unpublishedResultId,
 	});
 	assert.equal(retrieved.details.error, "Not found");
@@ -313,7 +314,7 @@ test("a failed content publication remains unavailable after session restoration
 	assert.match(retrieved.content[0].text, new RegExp(`resultId "${unpublishedResultId}"`));
 });
 
-test("a failed search publication remains unavailable after session restoration", async () => {
+test("a failed search publication remains unavailable to a second runtime", async () => {
 	const previousBraveApiKey = process.env.BRAVE_API_KEY;
 	process.env.BRAVE_API_KEY = "brave-test-key";
 	const configDir = await mkdtemp(join(tmpdir(), "pi-web-access-search-publication-"));
@@ -357,8 +358,9 @@ test("a failed search publication remains unavailable after session restoration"
 		const unpublishedResultId = unpublishedEntry.data.id;
 		assert.equal(typeof unpublishedResultId, "string");
 
-		await tools.startSession();
-		const retrieved = await tools.getSearchContent.execute("get-unpublished-search", {
+		const restoredRuntime = await loadRegisteredTools([], { configDir, sessionManager });
+		assert.ok(restoredRuntime.getSearchContent);
+		const retrieved = await restoredRuntime.getSearchContent.execute("get-unpublished-search", {
 			resultId: unpublishedResultId,
 		});
 		assert.equal(retrieved.details.error, "Not found");
@@ -370,7 +372,7 @@ test("a failed search publication remains unavailable after session restoration"
 	}
 });
 
-test("a failed inline search-content publication remains atomic after session restoration", async () => {
+test("a failed inline search-content publication remains atomic in a second runtime", async () => {
 	const previousTavilyApiKey = process.env.TAVILY_API_KEY;
 	process.env.TAVILY_API_KEY = "tavily-test-key";
 	const configDir = await mkdtemp(join(tmpdir(), "pi-web-access-paired-publication-"));
@@ -414,9 +416,10 @@ test("a failed inline search-content publication remains atomic after session re
 		const attemptedResultIds = unpublishedEntry.data.records.map((record) => record.id);
 		assert.equal(attemptedResultIds.length, 2);
 
-		await tools.treeSession();
+		const restoredRuntime = await loadRegisteredTools([], { configDir, sessionManager });
+		assert.ok(restoredRuntime.getSearchContent);
 		for (const resultId of attemptedResultIds) {
-			const retrieved = await tools.getSearchContent.execute(`get-${resultId}`, { resultId });
+			const retrieved = await restoredRuntime.getSearchContent.execute(`get-${resultId}`, { resultId });
 			assert.equal(retrieved.details.error, "Not found");
 		}
 	} finally {
@@ -493,7 +496,7 @@ test("a ready-notification failure does not report a successful background fetch
 	}
 });
 
-test("a failed background content publication remains unavailable after session restoration", async () => {
+test("a failed background content publication remains unavailable to a second runtime", async () => {
 	const previousBraveApiKey = process.env.BRAVE_API_KEY;
 	process.env.BRAVE_API_KEY = "brave-test-key";
 	const configDir = await mkdtemp(join(tmpdir(), "pi-web-access-background-publication-"));
@@ -546,12 +549,13 @@ test("a failed background content publication remains unavailable after session 
 		assert.doesNotMatch(failureMessage.content, /Full page content now available/);
 
 		await chmod(sessionFile, 0o600);
-		await tools.startSession();
-		const rejectedContent = await tools.getSearchContent.execute("get-rejected-background-content", {
+		const restoredRuntime = await loadRegisteredTools([], { configDir, sessionManager });
+		assert.ok(restoredRuntime.getSearchContent);
+		const rejectedContent = await restoredRuntime.getSearchContent.execute("get-rejected-background-content", {
 			resultId: searched.details.contentResultId,
 		});
 		assert.equal(rejectedContent.details.error, "Not found");
-		const restoredSearch = await tools.getSearchContent.execute("get-restored-background-search", {
+		const restoredSearch = await restoredRuntime.getSearchContent.execute("get-restored-background-search", {
 			resultId: searched.details.searchResultId,
 			queryIndex: 0,
 		});

@@ -3,6 +3,7 @@ import type { ExtractedContent } from "./extract.ts";
 import type { SearchResult } from "./search-provider.ts";
 
 const CACHE_TTL_MS = 60 * 60 * 1000;
+const rejectedStoredResultPublications = new WeakSet<object>();
 
 export interface QueryResultData {
 	query: string;
@@ -124,17 +125,15 @@ function withoutMedia(urls: ExtractedContent[]): ExtractedContent[] {
 
 export function createStoredResultStore() {
 	const storedResults = new Map<string, StoredResultData>();
-	const rejectedResultIds = new Set<string>();
 
 	function publishStoredResults(
 		publisher: StoredResultPublisher,
 		data: StoredResultData | StoredResultPublicationData,
-		records: StoredResultData[],
 	): void {
 		try {
 			publisher.appendEntry("web-search-results", data);
 		} catch (error) {
-			for (const record of records) rejectedResultIds.add(record.id);
+			rejectedStoredResultPublications.add(data);
 			throw error;
 		}
 	}
@@ -150,7 +149,7 @@ export function createStoredResultStore() {
 			timestamp: Date.now(),
 			queries,
 		};
-		publishStoredResults(publisher, data, [data]);
+		publishStoredResults(publisher, data);
 		storedResults.set(id, data);
 		return id;
 	}
@@ -166,7 +165,7 @@ export function createStoredResultStore() {
 			timestamp: Date.now(),
 			urls: withoutMedia(urls),
 		};
-		publishStoredResults(publisher, data, [data]);
+		publishStoredResults(publisher, data);
 		storedResults.set(contentResultId, data);
 		return contentResultId;
 	}
@@ -193,7 +192,7 @@ export function createStoredResultStore() {
 			type: "stored-result-publication",
 			records: [searchResult, contentResult],
 		};
-		publishStoredResults(publisher, publication, [searchResult, contentResult]);
+		publishStoredResults(publisher, publication);
 		storedResults.set(searchResult.id, searchResult);
 		storedResults.set(contentResult.id, contentResult);
 		return {
@@ -269,14 +268,14 @@ export function createStoredResultStore() {
 		for (const entry of ctx.sessionManager.getBranch()) {
 			if (entry.type !== "custom" || entry.customType !== "web-search-results") continue;
 			const data = entry.data;
+			if (isRecord(data) && rejectedStoredResultPublications.has(data)) continue;
 			if (isValidStoredData(data) && now - data.timestamp < CACHE_TTL_MS) {
-				if (!rejectedResultIds.has(data.id)) storedResults.set(data.id, data);
+				storedResults.set(data.id, data);
 				continue;
 			}
 			if (isValidStoredResultPublication(data)) {
 				const publicationIsFresh = now - data.records[0].timestamp < CACHE_TTL_MS;
-				const publicationWasRejected = data.records.some((record) => rejectedResultIds.has(record.id));
-				if (publicationIsFresh && !publicationWasRejected) {
+				if (publicationIsFresh) {
 					for (const record of data.records) storedResults.set(record.id, record);
 				}
 			}
