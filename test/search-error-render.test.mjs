@@ -91,13 +91,13 @@ test("plain (non-cancel) error stays a clean single line — no diagnostic noise
 test("fetch_content-style error (extras, no cancel) is expandable without browser diagnostics", () => {
 	const plan = buildSearchErrorPlan({
 		error: "Failed to fetch: https://example.com/x (404)",
-		extraLines: ["urls: 1/2 succeeded", "response id: resp_abc", "  \u25b8 https://example.com/x"],
+		extraLines: ["urls: 1/2 succeeded", "content result reference: content_abc", "  \u25b8 https://example.com/x"],
 	});
 	assert.notEqual(plan, null);
 	const expanded = plan.expanded.join("\n");
 	assert.ok(plan.expanded.length > 1);
 	assert.match(expanded, /urls: 1\/2 succeeded/);
-	assert.match(expanded, /resp_abc/);
+	assert.match(expanded, /content_abc/);
 	// MUST NOT show curator/browser diagnostics for a non-cancel error.
 	assert.doesNotMatch(expanded, /browser|cancel reason|queries started/);
 	assert.equal(typeof plan.expandHint, "string");

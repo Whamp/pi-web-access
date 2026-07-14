@@ -5,6 +5,7 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Changed
+- **Breaking:** Renamed the public stored-result reference contract. Producers now return `searchResultId` for Web search records and `contentResultId` for fetched source content; `get_search_content` accepts either as `resultId`. A one-item record no longer requires a selector.
 - Established `Whamp/pi-web-access` as an independent hard fork with its own roadmap.
 - Centralized provider eligibility, strict named-provider behavior, and automatic fallback policy in `web-search.ts`.
 - Switched installation and project metadata to the GitHub repository.
@@ -433,7 +434,7 @@ Initial release. Designed for pi v0.37.3.
   - Multiple URLs store for retrieval via `get_search_content`
   - Concurrent fetching (3 max) with 30s timeout
 - `get_search_content` tool - Retrieve stored search results or fetched content
-  - Access by response ID, URL, query, or index
+  - Access by Stored result reference, URL, query, or index
 - `/search` command - Interactive browser for stored results
 - TUI rendering with progress bars, URL lists, and expandable previews
 - Session-aware storage with 1-hour TTL
