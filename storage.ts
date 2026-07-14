@@ -30,11 +30,30 @@ export function storeResult(id: string, data: StoredSearchData): void {
 	storedResults.set(id, data);
 }
 
-export function createContentResult(
+type ContentPublisher = Pick<ExtensionAPI, "appendEntry">;
+
+interface ContentSelector {
+	url?: string;
+	urlIndex?: number;
+}
+
+interface ContentRetrievalResult {
+	content: Array<{ type: "text"; text: string }>;
+	details: {
+		error?: string;
+		resultId?: string;
+		urls?: string[];
+		url?: string;
+		title?: string;
+		contentLength?: number;
+	};
+}
+
+function publishContentResult(
+	contentResultId: string,
 	urls: ExtractedContent[],
-	publisher: Pick<ExtensionAPI, "appendEntry">,
-): { contentResultId: string; data: StoredSearchData } {
-	const contentResultId = generateId();
+	publisher: ContentPublisher,
+): void {
 	const storedUrls = urls.map(({ thumbnail: _thumbnail, frames: _frames, ...url }) => url);
 	const data: StoredSearchData = {
 		id: contentResultId,
@@ -44,11 +63,83 @@ export function createContentResult(
 	};
 	storeResult(contentResultId, data);
 	publisher.appendEntry("web-search-results", data);
-	return { contentResultId, data };
+}
+
+export function createContentResult(
+	urls: ExtractedContent[],
+	publisher: ContentPublisher,
+	contentResultId = generateId(),
+): string {
+	publishContentResult(contentResultId, urls, publisher);
+	return contentResultId;
+}
+
+export function reserveContentResultId(): string {
+	return generateId();
 }
 
 export function contentRetrievalCall(contentResultId: string): string {
 	return `get_search_content({ resultId: "${contentResultId}" })`;
+}
+
+export function retrieveContentResult(
+	resultId: string,
+	selector: ContentSelector,
+): ContentRetrievalResult | null {
+	const data = storedResults.get(resultId);
+	if (!data) {
+		return {
+			content: [{ type: "text", text: `Error: No stored result for resultId "${resultId}".` }],
+			details: { error: "Not found", resultId },
+		};
+	}
+	if (data.type !== "fetch" || !data.urls) return null;
+
+	const urls = data.urls.map((item) => item.url);
+	const available = urls.map((item, index) => `${index}: ${item}`).join("\n  ");
+	let urlData: ExtractedContent | undefined;
+
+	if (selector.url !== undefined) {
+		urlData = data.urls.find((item) => item.url === selector.url);
+		if (!urlData) {
+			return {
+				content: [{ type: "text", text: `URL "${selector.url}" not found for resultId "${resultId}". Available:\n  ${available}` }],
+				details: { error: "URL not found", resultId, urls },
+			};
+		}
+	} else if (selector.urlIndex !== undefined) {
+		urlData = data.urls[selector.urlIndex];
+		if (!urlData) {
+			return {
+				content: [{ type: "text", text: `urlIndex ${selector.urlIndex} is out of range for resultId "${resultId}". Available:\n  ${available}` }],
+				details: { error: "Index out of range", resultId, urls },
+			};
+		}
+	} else if (data.urls.length === 1) {
+		urlData = data.urls[0];
+	} else {
+		return {
+			content: [{ type: "text", text: `Choose a URL with url or urlIndex for resultId "${resultId}". Available:\n  ${available}` }],
+			details: { resultId, urls },
+		};
+	}
+
+	if (urlData.error) {
+		return {
+			content: [{ type: "text", text: `Stored content failed for resultId "${resultId}" at ${urlData.url}: ${urlData.error}` }],
+			details: { error: urlData.error, resultId, url: urlData.url },
+		};
+	}
+
+	return {
+		content: [{ type: "text", text: `# ${urlData.title}\n\n${urlData.content}` }],
+		details: {
+			resultId,
+			url: urlData.url,
+			title: urlData.title,
+			contentLength: urlData.content.length,
+		},
+	};
 }
 
 export function getResult(id: string): StoredSearchData | null {

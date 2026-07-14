@@ -65,6 +65,16 @@ function mockJinaPages(pages) {
 	};
 }
 
+const plainTheme = {
+	fg: (_color, text) => text,
+	bg: (_color, text) => text,
+	bold: (text) => text,
+};
+
+function renderText(component) {
+	return component.render(160).join("\n").trimEnd();
+}
+
 test("a complete single-page fetch publishes a content result without unnecessary retrieval guidance", async () => {
 	const tools = await loadRegisteredTools();
 	assert.ok(tools.fetchContent);
@@ -198,4 +208,71 @@ test("a restored single-page content result opens with resultId alone", async ()
 	});
 
 	assert.match(result.content[0].text, /Restored body marker/);
+});
+
+test("a restored multi-page content result lists and selects the saved pages", async () => {
+	const initial = await loadRegisteredTools();
+	assert.ok(initial.fetchContent);
+	const firstUrl = "http://127.0.0.1/restored-first";
+	const secondUrl = "http://127.0.0.1/restored-second";
+	mockJinaPages({
+		[firstUrl]: { title: "Restored first", content: "Restored first marker. ".repeat(30) },
+		[secondUrl]: { title: "Restored second", content: "Restored second marker. ".repeat(30) },
+	});
+	const fetched = await initial.fetchContent.execute("fetch-restored-many", { urls: [firstUrl, secondUrl] });
+	const storedEntry = initial.entries.find((entry) => entry.customType === "web-search-results");
+	assert.ok(storedEntry);
+
+	const restored = await loadRegisteredTools([{
+		type: "custom",
+		customType: storedEntry.customType,
+		data: storedEntry.data,
+	}]);
+	assert.ok(restored.getSearchContent);
+	const choices = await restored.getSearchContent.execute("list-restored-many", {
+		resultId: fetched.details.contentResultId,
+	});
+	assert.match(choices.content[0].text, new RegExp(`0: ${firstUrl}`));
+	assert.match(choices.content[0].text, new RegExp(`1: ${secondUrl}`));
+
+	const byUrl = await restored.getSearchContent.execute("get-restored-first", {
+		resultId: fetched.details.contentResultId,
+		url: firstUrl,
+	});
+	assert.match(byUrl.content[0].text, /Restored first marker/);
+	const byIndex = await restored.getSearchContent.execute("get-restored-second", {
+		resultId: fetched.details.contentResultId,
+		urlIndex: 1,
+	});
+	assert.match(byIndex.content[0].text, /Restored second marker/);
+});
+
+test("registered fetched-content renderers use contentResultId and resultId labels", async () => {
+	const tools = await loadRegisteredTools();
+	assert.ok(tools.fetchContent);
+	assert.ok(tools.getSearchContent);
+	const firstUrl = "http://127.0.0.1/render-first";
+	const secondUrl = "http://127.0.0.1/render-second";
+	mockJinaPages({
+		[firstUrl]: { title: "Rendered first", content: "Rendered first body. ".repeat(30) },
+		[secondUrl]: { title: "Rendered second", content: "Rendered second body. ".repeat(30) },
+	});
+
+	const fetched = await tools.fetchContent.execute("fetch-render", { url: firstUrl });
+	const fetchedText = renderText(tools.fetchContent.renderResult(fetched, { expanded: true, isPartial: false }, plainTheme));
+	assert.match(fetchedText, new RegExp(`contentResultId: ${fetched.details.contentResultId}`));
+	assert.doesNotMatch(fetchedText, /responseId|response id/i);
+
+	const failed = await tools.fetchContent.execute("fetch-render-error", { url: "not-a-url" });
+	const failedText = renderText(tools.fetchContent.renderResult(failed, { expanded: true, isPartial: false }, plainTheme));
+	assert.match(failedText, new RegExp(`contentResultId: ${failed.details.contentResultId}`));
+	assert.doesNotMatch(failedText, /responseId|response id/i);
+
+	const many = await tools.fetchContent.execute("fetch-render-many", { urls: [firstUrl, secondUrl] });
+	const retrievalCall = renderText(tools.getSearchContent.renderCall({ resultId: many.details.contentResultId }, plainTheme));
+	assert.match(retrievalCall, new RegExp(`resultId=${many.details.contentResultId}`));
+	const choices = await tools.getSearchContent.execute("render-list", { resultId: many.details.contentResultId });
+	const choicesText = renderText(tools.getSearchContent.renderResult(choices, { expanded: true, isPartial: false }, plainTheme));
+	assert.match(choicesText, new RegExp(`resultId: ${many.details.contentResultId}`));
+	assert.doesNotMatch(choicesText, /responseId|response id/i);
 });

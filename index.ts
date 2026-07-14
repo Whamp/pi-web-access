@@ -16,7 +16,9 @@ import {
 	generateId,
 	getAllResults,
 	getResult,
+	reserveContentResultId,
 	restoreFromSession,
+	retrieveContentResult,
 	storeResult,
 	type QueryResultData,
 	type StoredSearchData,
@@ -279,10 +281,6 @@ function isStaleExtensionContextError(error: unknown): boolean {
 	return error instanceof Error && error.message.includes("extension ctx is stale");
 }
 
-function stripThumbnails(results: ExtractedContent[]): ExtractedContent[] {
-	return results.map(({ thumbnail, frames, ...rest }) => rest);
-}
-
 function formatSearchSummary(results: SearchResult[], answer: string): string {
 	let output = answer ? `${answer}\n\n---\n\n**Sources:**\n` : "";
 	output += results.map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}`).join("\n\n");
@@ -543,14 +541,7 @@ export default function (pi: ExtensionAPI) {
 		try {
 			const fetched = await fetchAllContent(urls, controller.signal);
 			if (!sessionActive || !pendingFetches.has(fetchId)) return;
-			const data: StoredSearchData = {
-				id: fetchId,
-				type: "fetch",
-				timestamp: Date.now(),
-				urls: stripThumbnails(fetched),
-			};
-			pi.appendEntry("web-search-results", data);
-			storeResult(fetchId, data);
+			createContentResult(fetched, pi, fetchId);
 			const ok = fetched.filter(f => !f.error).length;
 			pi.sendMessage(
 				{
@@ -591,7 +582,7 @@ export default function (pi: ExtensionAPI) {
 
 	function startBackgroundFetch(urls: string[]): string | null {
 		if (urls.length === 0) return null;
-		const fetchId = generateId();
+		const fetchId = reserveContentResultId();
 		const controller = new AbortController();
 		pendingFetches.set(fetchId, controller);
 		void fetchAndPublishInBackground(fetchId, urls, controller);
@@ -869,15 +860,7 @@ export default function (pi: ExtensionAPI) {
 		const hasInlineReady = hasFullInlineCoverage(opts.urls, opts.inlineContent);
 		let fetchId: string | null = null;
 		if (hasInlineReady && opts.inlineContent) {
-			fetchId = generateId();
-			const data: StoredSearchData = {
-				id: fetchId,
-				type: "fetch",
-				timestamp: Date.now(),
-				urls: opts.inlineContent,
-			};
-			storeResult(fetchId, data);
-			pi.appendEntry("web-search-results", data);
+			fetchId = createContentResult(opts.inlineContent, pi);
 			if (!hasApprovedSummary) {
 				output += `---\nFull content for ${opts.inlineContent.length} sources available [${fetchId}].`;
 			}
@@ -1828,7 +1811,7 @@ export default function (pi: ExtensionAPI) {
 			const successful = fetchResults.filter((r) => !r.error).length;
 			const totalChars = fetchResults.reduce((sum, r) => sum + r.content.length, 0);
 
-			const { contentResultId } = createContentResult(fetchResults, pi);
+			const contentResultId = createContentResult(fetchResults, pi);
 
 			// Single URL: return content directly (possibly truncated) with contentResultId
 			if (urlList.length === 1) {
@@ -1967,7 +1950,7 @@ export default function (pi: ExtensionAPI) {
 				if (typeof fd.urlCount === "number" || typeof fd.successful === "number") {
 					extras.push(`urls: ${fd.successful ?? 0}/${fd.urlCount ?? 0} succeeded`);
 				}
-				if (fd.contentResultId) extras.push(`content result id: ${fd.contentResultId}`);
+				if (fd.contentResultId) extras.push(`contentResultId: ${fd.contentResultId}`);
 				if (fd.urls && fd.urls.length > 0) {
 					for (const u of fd.urls.slice(0, 8)) extras.push(`  \u25b8 ${u}`);
 					if (fd.urls.length > 8) extras.push(`  ... and ${fd.urls.length - 8} more`);
@@ -1998,6 +1981,9 @@ export default function (pi: ExtensionAPI) {
 					return new Text(statusLine + "\n" + theme.fg("dim", brief), 0, 0);
 				}
 				const lines = [statusLine];
+				if (details?.contentResultId) {
+					lines.push(theme.fg("dim", `contentResultId: ${details.contentResultId}`));
+				}
 				if (details?.prompt) {
 					const display = details.prompt.length > 250 ? details.prompt.slice(0, 247) + "..." : details.prompt;
 					lines.push(theme.fg("dim", `  prompt: "${display}"`));
@@ -2020,7 +2006,10 @@ export default function (pi: ExtensionAPI) {
 			}
 			const textContent = result.content.find((c) => c.type === "text")?.text || "";
 			const preview = textContent.length > 500 ? textContent.slice(0, 500) + "..." : textContent;
-			return new Text(statusLine + "\n" + theme.fg("dim", preview), 0, 0);
+			const reference = details?.contentResultId
+				? theme.fg("dim", `contentResultId: ${details.contentResultId}`) + "\n"
+				: "";
+			return new Text(statusLine + "\n" + reference + theme.fg("dim", preview), 0, 0);
 		},
 	});
 
@@ -2039,15 +2028,14 @@ export default function (pi: ExtensionAPI) {
 		}),
 
 		async execute(_toolCallId, params) {
-			const data = getResult(params.resultId);
-			if (!data) {
-				return {
-					content: [{ type: "text", text: `Error: No stored result for resultId "${params.resultId}".` }],
-					details: { error: "Not found", resultId: params.resultId },
-				};
-			}
+			const contentResult = retrieveContentResult(params.resultId, {
+				url: params.url,
+				urlIndex: params.urlIndex,
+			});
+			if (contentResult) return contentResult;
 
-			if (data.type === "search" && data.queries) {
+			const data = getResult(params.resultId);
+			if (data?.type === "search" && data.queries) {
 				let queryData: QueryResultData | undefined;
 
 				if (params.query !== undefined) {
@@ -2088,49 +2076,6 @@ export default function (pi: ExtensionAPI) {
 				};
 			}
 
-			if (data.type === "fetch" && data.urls) {
-				let urlData: ExtractedContent | undefined;
-				const urls = data.urls.map((item) => item.url);
-				const available = urls.map((item, index) => `${index}: ${item}`).join("\n  ");
-
-				if (params.url !== undefined) {
-					urlData = data.urls.find((item) => item.url === params.url);
-					if (!urlData) {
-						return {
-							content: [{ type: "text", text: `URL "${params.url}" not found for resultId "${params.resultId}". Available:\n  ${available}` }],
-							details: { error: "URL not found", resultId: params.resultId, urls },
-						};
-					}
-				} else if (params.urlIndex !== undefined) {
-					urlData = data.urls[params.urlIndex];
-					if (!urlData) {
-						return {
-							content: [{ type: "text", text: `urlIndex ${params.urlIndex} is out of range for resultId "${params.resultId}". Available:\n  ${available}` }],
-							details: { error: "Index out of range", resultId: params.resultId, urls },
-						};
-					}
-				} else if (data.urls.length === 1) {
-					urlData = data.urls[0];
-				} else {
-					return {
-						content: [{ type: "text", text: `Choose a URL with url or urlIndex for resultId "${params.resultId}". Available:\n  ${available}` }],
-						details: { resultId: params.resultId, urls },
-					};
-				}
-
-				if (urlData.error) {
-					return {
-						content: [{ type: "text", text: `Stored content failed for resultId "${params.resultId}" at ${urlData.url}: ${urlData.error}` }],
-						details: { error: urlData.error, resultId: params.resultId, url: urlData.url },
-					};
-				}
-
-				return {
-					content: [{ type: "text", text: `# ${urlData.title}\n\n${urlData.content}` }],
-					details: { resultId: params.resultId, url: urlData.url, title: urlData.title, contentLength: urlData.content.length },
-				};
-			}
-
 			return {
 				content: [{ type: "text", text: "Invalid stored data format" }],
 				details: { error: "Invalid data" },
@@ -2150,7 +2095,8 @@ export default function (pi: ExtensionAPI) {
 			else if (queryIndex !== undefined) target = `queryIndex=${queryIndex}`;
 			else if (url) target = url.length > 30 ? url.slice(0, 27) + "..." : url;
 			else if (urlIndex !== undefined) target = `urlIndex=${urlIndex}`;
-			return new Text(theme.fg("toolTitle", theme.bold("get_content ")) + theme.fg("accent", target || resultId.slice(0, 8)), 0, 0);
+			else target = `resultId=${resultId}`;
+			return new Text(theme.fg("toolTitle", theme.bold("get_content ")) + theme.fg("accent", target), 0, 0);
 		},
 
 		renderResult(result, { expanded }, theme) {
@@ -2158,6 +2104,7 @@ export default function (pi: ExtensionAPI) {
 				error?: string;
 				resultId?: string;
 				query?: string;
+				urls?: string[];
 				url?: string;
 				title?: string;
 				resultCount?: number;
@@ -2166,7 +2113,7 @@ export default function (pi: ExtensionAPI) {
 
 			if (details?.error) {
 				const extras: string[] = [];
-				if (details.resultId) extras.push(`result id: ${details.resultId}`);
+				if (details.resultId) extras.push(`resultId: ${details.resultId}`);
 				if (details.query) extras.push(`query: ${details.query}`);
 				if (details.url) extras.push(`url: ${details.url}`);
 				else if (details.title) extras.push(`resource: ${details.title}`);
@@ -2178,6 +2125,8 @@ export default function (pi: ExtensionAPI) {
 			let statusLine: string;
 			if (details?.query) {
 				statusLine = theme.fg("success", `"${details.query}"`) + theme.fg("muted", ` (${details.resultCount} results)`);
+			} else if (details?.urls) {
+				statusLine = theme.fg("success", `resultId: ${details.resultId}`) + theme.fg("muted", ` (${details.urls.length} URLs)`);
 			} else {
 				statusLine = theme.fg("success", details?.title || "Content") + theme.fg("muted", ` (${details?.contentLength ?? 0} chars)`);
 			}
@@ -2188,7 +2137,10 @@ export default function (pi: ExtensionAPI) {
 
 			const textContent = result.content.find((c) => c.type === "text")?.text || "";
 			const preview = textContent.length > 500 ? textContent.slice(0, 500) + "..." : textContent;
-			return new Text(statusLine + "\n" + theme.fg("dim", preview), 0, 0);
+			const reference = details?.resultId && !details.urls
+				? theme.fg("dim", `resultId: ${details.resultId}`) + "\n"
+				: "";
+			return new Text(statusLine + "\n" + reference + theme.fg("dim", preview), 0, 0);
 		},
 	});
 
