@@ -838,6 +838,7 @@ export default function (pi: ExtensionAPI) {
 			}
 		}
 
+		const searchResultId = storedResultStore.createSearchResult(opts.results, pi);
 		const hasInlineReady = hasFullInlineCoverage(opts.urls, opts.inlineContent);
 		let contentResultId: string | null = null;
 		if (hasInlineReady && opts.inlineContent) {
@@ -852,7 +853,6 @@ export default function (pi: ExtensionAPI) {
 			}
 		}
 
-		const searchResultId = storedResultStore.createSearchResult(opts.results, pi);
 		const isBackgroundFetch = contentResultId !== null && !hasInlineReady;
 
 		return {

@@ -17,10 +17,12 @@ async function loadRegisteredTools(branch = [], options = {}) {
 
 	const runtime = createExtensionRuntime();
 	const entries = [];
+	const sent = [];
 	runtime.appendEntry = (customType, data) => {
 		options.appendEntry?.(customType, data);
 		entries.push({ customType, data });
 	};
+	runtime.sendMessage = (message, sendOptions) => sent.push({ message, options: sendOptions });
 	runtime.refreshTools = () => {};
 	runtime.getActiveTools = () => [];
 	runtime.getAllTools = () => [];
@@ -55,9 +57,18 @@ async function loadRegisteredTools(branch = [], options = {}) {
 		entries,
 		fetchContent: extension.tools.get("fetch_content")?.definition,
 		getSearchContent: extension.tools.get("get_search_content")?.definition,
+		sent,
 		startSession,
 		webSearch: extension.tools.get("web_search")?.definition,
 	};
+}
+
+function deferred() {
+	let resolve;
+	const promise = new Promise((resolvePromise) => {
+		resolve = resolvePromise;
+	});
+	return { promise, resolve };
 }
 
 function mockJinaPages(pages) {
@@ -327,6 +338,71 @@ test("a failed search publication is not retrievable from the same runtime", asy
 		assert.equal(retrieved.details.error, "Not found");
 		assert.equal(retrieved.details.resultId, unpublishedResultId);
 	} finally {
+		if (previousBraveApiKey === undefined) delete process.env.BRAVE_API_KEY;
+		else process.env.BRAVE_API_KEY = previousBraveApiKey;
+	}
+});
+
+test("a failed primary search publication starts no background content work", async () => {
+	const previousBraveApiKey = process.env.BRAVE_API_KEY;
+	process.env.BRAVE_API_KEY = "brave-test-key";
+	const publicationError = new Error("primary search publication failed");
+	const contentGate = deferred();
+	let contentRequests = 0;
+	let attemptedContentResultId;
+	try {
+		const tools = await loadRegisteredTools([], {
+			appendEntry(_customType, data) {
+				if (data.type === "search") throw publicationError;
+				attemptedContentResultId = data.id;
+			},
+		});
+		assert.ok(tools.webSearch);
+		assert.ok(tools.getSearchContent);
+		globalThis.fetch = async (url) => {
+			const requested = String(url);
+			if (requested.startsWith("https://api.search.brave.com/res/v1/web/search")) {
+				return new Response(JSON.stringify({
+					web: {
+						results: [{
+							title: "Background source",
+							url: "http://127.0.0.1/background-source",
+							description: "Must not be fetched before primary publication",
+						}],
+					},
+				}), { status: 200, headers: { "content-type": "application/json" } });
+			}
+			if (requested === "https://r.jina.ai/http://127.0.0.1/background-source") {
+				contentRequests += 1;
+				await contentGate.promise;
+				return new Response(
+					"Title: Background source\nURL Source: http://127.0.0.1/background-source\nMarkdown Content:\nForbidden late content",
+					{ status: 200, headers: { "content-type": "text/markdown" } },
+				);
+			}
+			throw new Error(`Unexpected fetch: ${requested}`);
+		};
+
+		await assert.rejects(
+			tools.webSearch.execute(
+				"search-with-unpublished-content",
+				{ query: "publication ordering", provider: "brave", workflow: "none", includeContent: true },
+				undefined,
+				undefined,
+				{ hasUI: false },
+			),
+			publicationError,
+		);
+		contentGate.resolve();
+		await new Promise((resolve) => setImmediate(resolve));
+		await new Promise((resolve) => setImmediate(resolve));
+
+		assert.equal(contentRequests, 0);
+		assert.deepEqual(tools.entries, []);
+		assert.deepEqual(tools.sent, []);
+		assert.equal(attemptedContentResultId, undefined);
+	} finally {
+		contentGate.resolve();
 		if (previousBraveApiKey === undefined) delete process.env.BRAVE_API_KEY;
 		else process.env.BRAVE_API_KEY = previousBraveApiKey;
 	}
