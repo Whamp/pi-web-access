@@ -12,13 +12,21 @@ export interface QueryResultData {
 	provider?: string;
 }
 
-export interface StoredResultData {
+export interface StoredSearchResultData {
 	id: string;
-	type: "search" | "fetch";
+	type: "search";
 	timestamp: number;
-	queries?: QueryResultData[];
-	urls?: ExtractedContent[];
+	queries: QueryResultData[];
 }
+
+export interface StoredContentResultData {
+	id: string;
+	type: "fetch";
+	timestamp: number;
+	urls: ExtractedContent[];
+}
+
+export type StoredResultData = StoredSearchResultData | StoredContentResultData;
 
 type StoredResultPublisher = Pick<ExtensionAPI, "appendEntry">;
 
@@ -47,15 +55,50 @@ export function contentRetrievalCall(contentResultId: string): string {
 	return `get_search_content({ resultId: "${contentResultId}" })`;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isNullableString(value: unknown): value is string | null {
+	return typeof value === "string" || value === null;
+}
+
+function isSearchResult(value: unknown): value is SearchResult {
+	return isRecord(value)
+		&& typeof value.title === "string"
+		&& typeof value.url === "string"
+		&& typeof value.snippet === "string";
+}
+
+function isQueryResultData(value: unknown): value is QueryResultData {
+	return isRecord(value)
+		&& typeof value.query === "string"
+		&& typeof value.answer === "string"
+		&& Array.isArray(value.results)
+		&& value.results.every(isSearchResult)
+		&& isNullableString(value.error)
+		&& (value.provider === undefined || typeof value.provider === "string");
+}
+
+function isExtractedContent(value: unknown): value is ExtractedContent {
+	return isRecord(value)
+		&& typeof value.url === "string"
+		&& typeof value.title === "string"
+		&& typeof value.content === "string"
+		&& isNullableString(value.error);
+}
+
 function isValidStoredData(data: unknown): data is StoredResultData {
-	if (!data || typeof data !== "object") return false;
-	const d = data as Record<string, unknown>;
-	if (typeof d.id !== "string" || !d.id) return false;
-	if (d.type !== "search" && d.type !== "fetch") return false;
-	if (typeof d.timestamp !== "number") return false;
-	if (d.type === "search" && !Array.isArray(d.queries)) return false;
-	if (d.type === "fetch" && !Array.isArray(d.urls)) return false;
-	return true;
+	if (!isRecord(data)) return false;
+	if (typeof data.id !== "string" || data.id.length === 0) return false;
+	if (typeof data.timestamp !== "number" || !Number.isFinite(data.timestamp)) return false;
+	if (data.type === "search") {
+		return Array.isArray(data.queries) && data.queries.every(isQueryResultData);
+	}
+	if (data.type === "fetch") {
+		return Array.isArray(data.urls) && data.urls.every(isExtractedContent);
+	}
+	return false;
 }
 
 export function createStoredResultStore() {
@@ -81,13 +124,13 @@ export function createStoredResultStore() {
 		return id;
 	}
 
-	function publishContentResult(
-		contentResultId: string,
+	function createContentResult(
 		urls: ExtractedContent[],
 		publisher: StoredResultPublisher,
-	): void {
+		contentResultId = generateId(),
+	): string {
 		const storedUrls = urls.map(({ thumbnail: _thumbnail, frames: _frames, ...url }) => url);
-		const data: StoredResultData = {
+		const data: StoredContentResultData = {
 			id: contentResultId,
 			type: "fetch",
 			timestamp: Date.now(),
@@ -95,14 +138,6 @@ export function createStoredResultStore() {
 		};
 		publisher.appendEntry("web-search-results", data);
 		storeResult(contentResultId, data);
-	}
-
-	function createContentResult(
-		urls: ExtractedContent[],
-		publisher: StoredResultPublisher,
-		contentResultId = generateId(),
-	): string {
-		publishContentResult(contentResultId, urls, publisher);
 		return contentResultId;
 	}
 

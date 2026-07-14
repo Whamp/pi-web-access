@@ -537,7 +537,7 @@ export default function (pi: ExtensionAPI) {
 			pi.sendMessage(
 				{
 					customType: "web-search-content-ready",
-					content: `Content fetched for ${ok}/${fetched.length} URLs [${contentResultId}]. Full page content now available.`,
+					content: `Content fetched for ${ok}/${fetched.length} URLs (contentResultId: ${contentResultId}). Full page content now available. Use ${contentRetrievalCall(contentResultId)}.`,
 					display: true,
 				},
 				{ triggerTurn: true },
@@ -556,7 +556,7 @@ export default function (pi: ExtensionAPI) {
 				pi.sendMessage(
 					{
 						customType: "web-search-error",
-						content: `Content fetch failed [${contentResultId}]: ${message}`,
+						content: `Content fetch failed (contentResultId: ${contentResultId}): ${message}`,
 						display: true,
 					},
 					{ triggerTurn: false },
@@ -843,16 +843,16 @@ export default function (pi: ExtensionAPI) {
 		if (hasInlineReady && opts.inlineContent) {
 			contentResultId = storedResultStore.createContentResult(opts.inlineContent, pi);
 			if (!hasApprovedSummary) {
-				output += `---\nFull content for ${opts.inlineContent.length} sources available [${contentResultId}].`;
+				output += `---\nFull content for ${opts.inlineContent.length} sources available (contentResultId: ${contentResultId}). Use ${contentRetrievalCall(contentResultId)}.`;
 			}
 		} else if (opts.includeContent) {
 			contentResultId = startBackgroundFetch(opts.urls);
 			if (contentResultId && !hasApprovedSummary) {
-				output += `---\nContent fetching in background [${contentResultId}]. Will notify when ready.`;
+				output += `---\nContent fetching in background (contentResultId: ${contentResultId}). Not ready yet; will notify when ready.`;
 			}
 		}
 
-		const searchId = storedResultStore.createSearchResult(opts.results, pi);
+		const searchResultId = storedResultStore.createSearchResult(opts.results, pi);
 		const isBackgroundFetch = contentResultId !== null && !hasInlineReady;
 
 		return {
@@ -865,7 +865,7 @@ export default function (pi: ExtensionAPI) {
 				includeContent: opts.includeContent,
 				contentResultId,
 				fetchUrls: isBackgroundFetch ? opts.urls : undefined,
-				searchId,
+				searchResultId,
 				...(opts.curated ? {
 					curated: true,
 					curatedFrom: opts.curatedFrom,

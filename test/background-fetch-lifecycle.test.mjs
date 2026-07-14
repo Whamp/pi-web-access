@@ -83,7 +83,11 @@ async function startBackgroundSearch(runtime, callId) {
 		{ hasUI: false },
 	);
 	assert.ok(result.details.contentResultId, "web_search should start a background fetch");
+	assert.equal(typeof result.details.searchResultId, "string");
+	assert.equal("searchId" in result.details, false);
 	assert.equal("fetchId" in result.details, false);
+	assert.match(result.content[0].text, new RegExp(`contentResultId: ${result.details.contentResultId}`));
+	return result.details.contentResultId;
 }
 
 test("a second cached extension runtime cannot cancel the first runtime's background fetch", async () => {
@@ -113,7 +117,7 @@ test("a second cached extension runtime cannot cancel the first runtime's backgr
 
 	const runtimeA = await createRuntime(configDir, "A");
 	await runtimeA.start();
-	await startBackgroundSearch(runtimeA, "search-a");
+	const contentResultId = await startBackgroundSearch(runtimeA, "search-a");
 
 	const runtimeB = await createRuntime(configDir, "B");
 	await runtimeB.start();
@@ -121,6 +125,11 @@ test("a second cached extension runtime cannot cancel the first runtime's backgr
 
 	await waitFor(() => runtimeA.sent.length > 0);
 	assert.equal(runtimeA.sent.length, 1);
+	assert.match(runtimeA.sent[0].message.content, new RegExp(`contentResultId: ${contentResultId}`));
+	assert.match(
+		runtimeA.sent[0].message.content,
+		new RegExp(`get_search_content\\(\\{ resultId: "${contentResultId}" \\}\\)`),
+	);
 	assert.equal(runtimeB.sent.length, 0);
 });
 

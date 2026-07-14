@@ -244,7 +244,7 @@ test("starting another cached runtime does not invalidate the owner's content re
 	assert.match(retrieved.content[0].text, /Still-owned marker/);
 });
 
-test("a failed content publication is not retrievable from another cached runtime", async () => {
+test("a failed content publication is not retrievable from the same runtime", async () => {
 	const configDir = await mkdtemp(join(tmpdir(), "pi-web-access-content-publication-"));
 	let unpublishedResultId;
 	const publicationError = new Error("This extension ctx is stale");
@@ -255,9 +255,8 @@ test("a failed content publication is not retrievable from another cached runtim
 			throw publicationError;
 		},
 	});
-	const otherRuntime = await loadRegisteredTools([], { configDir });
 	assert.ok(failingRuntime.fetchContent);
-	assert.ok(otherRuntime.getSearchContent);
+	assert.ok(failingRuntime.getSearchContent);
 	mockJinaPages({
 		"http://127.0.0.1/unpublished": {
 			title: "Unpublished page",
@@ -272,7 +271,7 @@ test("a failed content publication is not retrievable from another cached runtim
 	assert.equal(failingRuntime.entries.length, 0);
 	assert.equal(typeof unpublishedResultId, "string");
 
-	const retrieved = await otherRuntime.getSearchContent.execute("get-unpublished", {
+	const retrieved = await failingRuntime.getSearchContent.execute("get-unpublished", {
 		resultId: unpublishedResultId,
 	});
 	assert.equal(retrieved.details.error, "Not found");
@@ -330,6 +329,47 @@ test("a failed search publication is not retrievable from the same runtime", asy
 	} finally {
 		if (previousBraveApiKey === undefined) delete process.env.BRAVE_API_KEY;
 		else process.env.BRAVE_API_KEY = previousBraveApiKey;
+	}
+});
+
+test("malformed restored records are ignored", async () => {
+	const malformedRecords = [
+		{
+			id: "malformed-null-content",
+			type: "fetch",
+			timestamp: Date.now(),
+			urls: [null],
+		},
+		{
+			id: "malformed-content-error",
+			type: "fetch",
+			timestamp: Date.now(),
+			urls: [{ url: "https://example.com", title: "Example", content: "Body", error: 42 }],
+		},
+		{
+			id: "malformed-search-result",
+			type: "search",
+			timestamp: Date.now(),
+			queries: [{ query: "example", answer: "Answer", results: [null], error: null }],
+		},
+		{
+			id: "malformed-timestamp",
+			type: "fetch",
+			timestamp: "now",
+			urls: [],
+		},
+	];
+	const restored = await loadRegisteredTools(malformedRecords.map((data) => ({
+		type: "custom",
+		customType: "web-search-results",
+		data,
+	})));
+	assert.ok(restored.getSearchContent);
+
+	for (const { id: resultId } of malformedRecords) {
+		const result = await restored.getSearchContent.execute(`get-${resultId}`, { resultId });
+		assert.equal(result.details.error, "Not found");
+		assert.equal(result.details.resultId, resultId);
 	}
 });
 
