@@ -115,6 +115,18 @@ function renderText(component) {
 	return component.render(160).join("\n").trimEnd();
 }
 
+test("web search metadata explains how to retrieve stored search and content results", async () => {
+	const tools = await loadRegisteredTools();
+	assert.ok(tools.webSearch);
+
+	for (const metadata of [tools.webSearch.description, tools.webSearch.promptSnippet]) {
+		assert.match(metadata, /searchResultId/);
+		assert.match(metadata, /contentResultId/);
+		assert.match(metadata, /get_search_content/);
+		assert.match(metadata, /resultId/);
+	}
+});
+
 test("a complete single-page fetch publishes a content result without unnecessary retrieval guidance", async () => {
 	const tools = await loadRegisteredTools();
 	assert.ok(tools.fetchContent);
