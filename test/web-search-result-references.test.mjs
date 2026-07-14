@@ -137,8 +137,17 @@ test("a registered single-query web search exposes searchResultId and opens with
 	const searched = await search(tools, { query: "stored search protocol" });
 
 	assert.equal(typeof searched.details.searchResultId, "string");
-	assert.equal("searchId" in searched.details, false);
-	assert.equal("fetchId" in searched.details, false);
+	assert.equal(searched.details.contentResultId, null);
+	assert.deepEqual(Object.keys(searched.details).sort(), [
+		"contentResultId",
+		"fetchUrls",
+		"includeContent",
+		"queries",
+		"queryCount",
+		"searchResultId",
+		"successfulQueries",
+		"totalResults",
+	]);
 	assert.doesNotMatch(searched.content[0].text, /get_search_content/);
 
 	const retrieved = await tools.getSearchContent.execute("retrieve-call", {
@@ -283,8 +292,10 @@ test("registered renderers show semantic search and result references", async ()
 	mockExaSearch();
 	const searched = await search(tools, { queries: ["render first", "render second"] });
 	const webSearchText = renderText(tools.webSearch.renderResult(searched, { expanded: true, isPartial: false }, plainTheme));
-	assert.match(webSearchText, new RegExp(`searchResultId: ${searched.details.searchResultId}`));
-	assert.doesNotMatch(webSearchText, /searchId:|fetchId:/);
+	assert.deepEqual(
+		webSearchText.split("\n").map((line) => line.trim()).filter((line) => /[A-Za-z]+Id:/.test(line)),
+		[`searchResultId: ${searched.details.searchResultId}`],
+	);
 
 	const choices = await tools.getSearchContent.execute("render-choices", { resultId: searched.details.searchResultId });
 	const choicesText = renderText(tools.getSearchContent.renderResult(choices, { expanded: true }, plainTheme));

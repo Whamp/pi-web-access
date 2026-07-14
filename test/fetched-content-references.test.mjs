@@ -139,7 +139,21 @@ test("a complete single-page fetch publishes a content result without unnecessar
 	const result = await tools.fetchContent.execute("fetch-short", { url: "http://127.0.0.1/short" });
 
 	assert.equal(typeof result.details.contentResultId, "string");
-	assert.equal("responseId" in result.details, false);
+	assert.deepEqual(Object.keys(result.details).sort(), [
+		"contentResultId",
+		"duration",
+		"frames",
+		"hasImage",
+		"imageCount",
+		"prompt",
+		"successful",
+		"timestamp",
+		"title",
+		"totalChars",
+		"truncated",
+		"urlCount",
+		"urls",
+	]);
 	assert.doesNotMatch(result.content.at(-1).text, /get_search_content/);
 });
 
@@ -148,10 +162,21 @@ test("a truncated single-page fetch gives an exact resultId call that returns th
 	assert.ok(tools.fetchContent);
 	assert.ok(tools.getSearchContent);
 	assert.deepEqual(tools.getSearchContent.parameters.required, ["resultId"]);
-	assert.equal("responseId" in tools.getSearchContent.parameters.properties, false);
-	assert.match(tools.getSearchContent.description, /resultId/);
-	assert.match(tools.getSearchContent.promptSnippet, /resultId/);
-	assert.doesNotMatch(tools.getSearchContent.promptSnippet, /responseId/);
+	assert.deepEqual(Object.keys(tools.getSearchContent.parameters.properties).sort(), [
+		"query",
+		"queryIndex",
+		"resultId",
+		"url",
+		"urlIndex",
+	]);
+	assert.equal(
+		tools.getSearchContent.description,
+		"Retrieve full content from a previous web_search or fetch_content call by passing its stored reference as resultId.",
+	);
+	assert.equal(
+		tools.getSearchContent.promptSnippet,
+		"Use after web_search/fetch_content when full stored content is needed via resultId plus query/url selectors.",
+	);
 	const fullContent = `Opening marker\n${"long content ".repeat(2600)}\nClosing marker`;
 	mockJinaPages({
 		"http://127.0.0.1/long": { title: "Long page", content: fullContent },
@@ -798,21 +823,27 @@ test("registered fetched-content renderers use contentResultId and resultId labe
 
 	const fetched = await tools.fetchContent.execute("fetch-render", { url: firstUrl });
 	const fetchedText = renderText(tools.fetchContent.renderResult(fetched, { expanded: true, isPartial: false }, plainTheme));
-	assert.match(fetchedText, new RegExp(`contentResultId: ${fetched.details.contentResultId}`));
-	assert.doesNotMatch(fetchedText, /responseId|response id/i);
+	assert.deepEqual(
+		fetchedText.split("\n").map((line) => line.trim()).filter((line) => /[A-Za-z]+Id:/.test(line)),
+		[`contentResultId: ${fetched.details.contentResultId}`],
+	);
 
 	const failed = await tools.fetchContent.execute("fetch-render-error", { url: "not-a-url" });
 	const failedText = renderText(tools.fetchContent.renderResult(failed, { expanded: true, isPartial: false }, plainTheme));
-	assert.match(failedText, new RegExp(`contentResultId: ${failed.details.contentResultId}`));
-	assert.doesNotMatch(failedText, /responseId|response id/i);
+	assert.deepEqual(
+		failedText.split("\n").map((line) => line.trim()).filter((line) => /[A-Za-z]+Id:/.test(line)),
+		[`contentResultId: ${failed.details.contentResultId}`],
+	);
 
 	const many = await tools.fetchContent.execute("fetch-render-many", { urls: [firstUrl, secondUrl] });
 	const retrievalCall = renderText(tools.getSearchContent.renderCall({ resultId: many.details.contentResultId }, plainTheme));
 	assert.match(retrievalCall, new RegExp(`resultId=${many.details.contentResultId}`));
 	const choices = await tools.getSearchContent.execute("render-list", { resultId: many.details.contentResultId });
 	const choicesText = renderText(tools.getSearchContent.renderResult(choices, { expanded: true, isPartial: false }, plainTheme));
-	assert.match(choicesText, new RegExp(`resultId: ${many.details.contentResultId}`));
-	assert.doesNotMatch(choicesText, /responseId|response id/i);
+	assert.deepEqual(
+		choicesText.split("\n").map((line) => line.trim()).filter((line) => /[A-Za-z]+Id:/.test(line)),
+		[`resultId: ${many.details.contentResultId} (2 URLs)`],
+	);
 
 	const unknownUrl = await tools.getSearchContent.execute("render-unknown-url", {
 		resultId: many.details.contentResultId,

@@ -84,8 +84,16 @@ async function startBackgroundSearch(runtime, callId) {
 	);
 	assert.ok(result.details.contentResultId, "web_search should start a background fetch");
 	assert.equal(typeof result.details.searchResultId, "string");
-	assert.equal("searchId" in result.details, false);
-	assert.equal("fetchId" in result.details, false);
+	assert.deepEqual(Object.keys(result.details).sort(), [
+		"contentResultId",
+		"fetchUrls",
+		"includeContent",
+		"queries",
+		"queryCount",
+		"searchResultId",
+		"successfulQueries",
+		"totalResults",
+	]);
 	assert.match(result.content[0].text, new RegExp(`contentResultId: ${result.details.contentResultId}`));
 	assert.doesNotMatch(result.content[0].text, /get_search_content/);
 	return result.details.contentResultId;
