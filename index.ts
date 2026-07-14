@@ -580,10 +580,6 @@ export default function (pi: ExtensionAPI) {
 		return contentResultId;
 	}
 
-	function storeAndPublishSearch(results: QueryResultData[]): string {
-		return storedResultStore.createSearchResult(results, pi);
-	}
-
 	interface SearchReturnOptions {
 		queryList: string[];
 		results: QueryResultData[];
@@ -856,7 +852,7 @@ export default function (pi: ExtensionAPI) {
 			}
 		}
 
-		const searchId = storeAndPublishSearch(opts.results);
+		const searchId = storedResultStore.createSearchResult(opts.results, pi);
 		const isBackgroundFetch = contentResultId !== null && !hasInlineReady;
 
 		return {

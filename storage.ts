@@ -20,7 +20,7 @@ export interface StoredResultData {
 	urls?: ExtractedContent[];
 }
 
-type ContentPublisher = Pick<ExtensionAPI, "appendEntry">;
+type StoredResultPublisher = Pick<ExtensionAPI, "appendEntry">;
 
 interface ContentSelector {
 	url?: string;
@@ -67,7 +67,7 @@ export function createStoredResultStore() {
 
 	function createSearchResult(
 		queries: QueryResultData[],
-		publisher: ContentPublisher,
+		publisher: StoredResultPublisher,
 	): string {
 		const id = generateId();
 		const data: StoredResultData = {
@@ -76,15 +76,15 @@ export function createStoredResultStore() {
 			timestamp: Date.now(),
 			queries,
 		};
-		storeResult(id, data);
 		publisher.appendEntry("web-search-results", data);
+		storeResult(id, data);
 		return id;
 	}
 
 	function publishContentResult(
 		contentResultId: string,
 		urls: ExtractedContent[],
-		publisher: ContentPublisher,
+		publisher: StoredResultPublisher,
 	): void {
 		const storedUrls = urls.map(({ thumbnail: _thumbnail, frames: _frames, ...url }) => url);
 		const data: StoredResultData = {
@@ -99,7 +99,7 @@ export function createStoredResultStore() {
 
 	function createContentResult(
 		urls: ExtractedContent[],
-		publisher: ContentPublisher,
+		publisher: StoredResultPublisher,
 		contentResultId = generateId(),
 	): string {
 		publishContentResult(contentResultId, urls, publisher);

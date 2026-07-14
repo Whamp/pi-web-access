@@ -56,6 +56,7 @@ async function loadRegisteredTools(branch = [], options = {}) {
 		fetchContent: extension.tools.get("fetch_content")?.definition,
 		getSearchContent: extension.tools.get("get_search_content")?.definition,
 		startSession,
+		webSearch: extension.tools.get("web_search")?.definition,
 	};
 }
 
@@ -279,6 +280,57 @@ test("a failed content publication is not retrievable from another cached runtim
 	assert.match(retrieved.content[0].text, new RegExp(`resultId "${unpublishedResultId}"`));
 
 	await loadRegisteredTools([], { configDir });
+});
+
+test("a failed search publication is not retrievable from the same runtime", async () => {
+	const previousBraveApiKey = process.env.BRAVE_API_KEY;
+	process.env.BRAVE_API_KEY = "brave-test-key";
+	let unpublishedResultId;
+	const publicationError = new Error("search publication failed");
+	try {
+		const tools = await loadRegisteredTools([], {
+			appendEntry(_customType, data) {
+				unpublishedResultId = data.id;
+				throw publicationError;
+			},
+		});
+		assert.ok(tools.webSearch);
+		assert.ok(tools.getSearchContent);
+		globalThis.fetch = async (url) => {
+			const requested = String(url);
+			assert.match(requested, /^https:\/\/api\.search\.brave\.com\/res\/v1\/web\/search/);
+			return new Response(JSON.stringify({
+				web: {
+					results: [{
+						title: "Published only after session entry",
+						url: "https://example.com/atomic-search",
+						description: "Search result held until publication succeeds",
+					}],
+				},
+			}), { status: 200, headers: { "content-type": "application/json" } });
+		};
+
+		await assert.rejects(
+			tools.webSearch.execute(
+				"search-unpublished",
+				{ query: "atomic search publication", provider: "brave", workflow: "none" },
+				undefined,
+				undefined,
+				{ hasUI: false },
+			),
+			publicationError,
+		);
+		assert.equal(typeof unpublishedResultId, "string");
+
+		const retrieved = await tools.getSearchContent.execute("get-unpublished-search", {
+			resultId: unpublishedResultId,
+		});
+		assert.equal(retrieved.details.error, "Not found");
+		assert.equal(retrieved.details.resultId, unpublishedResultId);
+	} finally {
+		if (previousBraveApiKey === undefined) delete process.env.BRAVE_API_KEY;
+		else process.env.BRAVE_API_KEY = previousBraveApiKey;
+	}
 });
 
 test("a restored single-page content result opens with resultId alone", async () => {

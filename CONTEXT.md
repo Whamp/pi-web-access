@@ -24,10 +24,6 @@ A search that delegates provider choice by selecting `auto`, either in the reque
 An opaque identifier for one stored Web search or fetched source content record. Pass either kind to `get_search_content` as `resultId`.
 _Avoid_: Stored search ID, response ID
 
-**Search result reference**:
-A Stored result reference for a Web search record. Producers expose it as `searchResultId`.
-_Avoid_: `searchId`
-
 **Content result reference**:
 A Stored result reference for a fetched source content record. Producers expose it as `contentResultId`.
 _Avoid_: Fetch result reference, `fetchId`, `responseId`
