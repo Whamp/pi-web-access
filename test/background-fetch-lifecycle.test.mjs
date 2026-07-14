@@ -30,7 +30,7 @@ async function waitFor(predicate) {
 	assert.fail("condition was not met before timeout");
 }
 
-async function createRuntime(configDir, label) {
+async function createRuntime(configDir, label, branch = []) {
 	const runtime = createExtensionRuntime();
 	const sent = [];
 	const entries = [];
@@ -56,7 +56,7 @@ async function createRuntime(configDir, label) {
 		hasUI: false,
 		mode: "print",
 		cwd: configDir,
-		sessionManager: { getBranch: () => [] },
+		sessionManager: { getBranch: () => branch },
 		ui: { setWidget() {}, notify() {} },
 	};
 	return {
@@ -87,6 +87,7 @@ async function startBackgroundSearch(runtime, callId) {
 	assert.equal("searchId" in result.details, false);
 	assert.equal("fetchId" in result.details, false);
 	assert.match(result.content[0].text, new RegExp(`contentResultId: ${result.details.contentResultId}`));
+	assert.doesNotMatch(result.content[0].text, /get_search_content/);
 	return result.details.contentResultId;
 }
 
@@ -131,6 +132,56 @@ test("a second cached extension runtime cannot cancel the first runtime's backgr
 		new RegExp(`get_search_content\\(\\{ resultId: "${contentResultId}" \\}\\)`),
 	);
 	assert.equal(runtimeB.sent.length, 0);
+
+	const getSearchContent = runtimeA.extension.tools.get("get_search_content")?.definition;
+	assert.ok(getSearchContent, "runtime should register get_search_content");
+	const retrieved = await getSearchContent.execute("retrieve-a", { resultId: contentResultId });
+	assert.equal(retrieved.details.error, undefined);
+	assert.match(retrieved.content[0].text, /# Article/);
+
+	const branch = runtimeA.entries.map(({ customType, data }) => ({ type: "custom", customType, data }));
+	const restoredRuntime = await createRuntime(configDir, "restored", branch);
+	await restoredRuntime.start();
+	const restoredGetSearchContent = restoredRuntime.extension.tools.get("get_search_content")?.definition;
+	assert.ok(restoredGetSearchContent, "restored runtime should register get_search_content");
+	const restored = await restoredGetSearchContent.execute("retrieve-restored", { resultId: contentResultId });
+	assert.equal(restored.details.error, undefined);
+	assert.match(restored.content[0].text, /# Article/);
+});
+
+test("an all-error background fetch reports the failed content reference without retrieval guidance", async () => {
+	globalThis.fetch = async (url) => {
+		const requestUrl = String(url);
+		if (requestUrl.startsWith("https://api.search.brave.com/res/v1/web/search")) {
+			return new Response(JSON.stringify({
+				web: {
+					results: [{
+						title: "Unavailable article",
+						url: "http://127.0.0.1/unavailable",
+						description: "A deterministic failed content result",
+					}],
+				},
+			}), { status: 200, headers: { "content-type": "application/json" } });
+		}
+		if (
+			requestUrl === "https://r.jina.ai/http://127.0.0.1/unavailable"
+			|| requestUrl === "http://127.0.0.1/unavailable"
+		) {
+			return new Response("upstream failed", { status: 503, statusText: "Service Unavailable" });
+		}
+		throw new Error(`Unexpected fetch: ${requestUrl}`);
+	};
+
+	const runtime = await createRuntime(configDir, "failed");
+	await runtime.start();
+	const contentResultId = await startBackgroundSearch(runtime, "search-failed");
+
+	await waitFor(() => runtime.sent.length > 0);
+	assert.equal(runtime.sent.length, 1);
+	assert.equal(runtime.sent[0].message.customType, "web-search-error");
+	assert.match(runtime.sent[0].message.content, /Content fetch failed/);
+	assert.match(runtime.sent[0].message.content, new RegExp(`contentResultId: ${contentResultId}`));
+	assert.doesNotMatch(runtime.sent[0].message.content, /get_search_content|Full page content now available/);
 });
 
 test("background completion from an expired runtime does not leak a stale-context rejection", async () => {

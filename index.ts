@@ -552,6 +552,24 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			const ok = fetched.filter(f => !f.error).length;
+			if (ok === 0) {
+				const message = fetched.find(f => f.error)?.error ?? "No source content was fetched";
+				try {
+					pi.sendMessage(
+						{
+							customType: "web-search-error",
+							content: `Content fetch failed (contentResultId: ${contentResultId}): ${message}`,
+							display: true,
+						},
+						{ triggerTurn: false },
+					);
+				} catch {
+					// The runtime cannot safely publish further background notifications.
+					sessionActive = false;
+					abortPendingFetches();
+				}
+				return;
+			}
 			try {
 				pi.sendMessage(
 					{
