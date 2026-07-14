@@ -16,6 +16,7 @@ async function loadRegisteredTools(branch = [], options = {}) {
 	await writeFile(join(configDir, "web-search.json"), JSON.stringify({ ssrf: { allowRanges: ["127.0.0.0/8"] } }));
 	process.env.PI_CODING_AGENT_DIR = configDir;
 	process.env.EXA_API_KEY = "exa-test-key";
+	process.env.BRAVE_API_KEY = "brave-test-key";
 
 	const runtime = createExtensionRuntime();
 	const entries = [];
@@ -82,6 +83,27 @@ function mockExaSearch() {
 			}] }), { status: 200, headers: { "content-type": "application/json" } });
 		}
 		return nativeFetch(url, options);
+	};
+}
+
+function mockBraveSearchWithPendingContent() {
+	globalThis.fetch = async (url) => {
+		const requested = String(url);
+		if (requested.startsWith("https://api.search.brave.com/res/v1/web/search")) {
+			return new Response(JSON.stringify({
+				web: {
+					results: [{
+						title: "Pending source",
+						url: "http://127.0.0.1/pending-source",
+						description: "Search result awaiting fetched source content",
+					}],
+				},
+			}), { status: 200, headers: { "content-type": "application/json" } });
+		}
+		if (requested === "https://r.jina.ai/http://127.0.0.1/pending-source") {
+			return new Promise(() => {});
+		}
+		throw new Error(`Unexpected fetch: ${requested}`);
 	};
 }
 
@@ -179,6 +201,25 @@ test("an automatic summary gives distinct retrieval calls for omitted search res
 	assert.match(searchResult.content[0].text, /Full answer for condensed query/);
 	const contentResult = await tools.getSearchContent.execute("summary-content", { resultId: contentResultId });
 	assert.match(contentResult.content[0].text, /Complete source content for condensed query/);
+});
+
+test("an automatic summary identifies pending source content separately from omitted search results", async () => {
+	const tools = await loadRegisteredTools();
+	mockBraveSearchWithPendingContent();
+	const summarized = await tools.webSearch.execute(
+		"auto-summary-pending-content",
+		{ query: "pending content query", provider: "brave", workflow: "auto-summary", includeContent: true },
+		undefined,
+		undefined,
+		tools.context,
+	);
+	const { searchResultId, contentResultId } = summarized.details;
+
+	assert.equal(typeof searchResultId, "string");
+	assert.equal(typeof contentResultId, "string");
+	assert.match(summarized.content[0].text, new RegExp(`get_search_content\\(\\{ resultId: "${searchResultId}" \\}\\)`));
+	assert.match(summarized.content[0].text, new RegExp(`Content fetching in background \\(contentResultId: ${contentResultId}\\)`));
+	assert.match(summarized.content[0].text, /Not ready yet; will notify when ready/);
 });
 
 test("a curated summary gives a model-visible retrieval call for omitted search results", async () => {

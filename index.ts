@@ -864,6 +864,8 @@ export default function (pi: ExtensionAPI) {
 			output += `\n\n---\nFull Web search results: ${storedResultRetrievalCall(searchResultId)}.`;
 			if (contentResultId && hasInlineReady) {
 				output += `\nFetched source content: ${storedResultRetrievalCall(contentResultId)}.`;
+			} else if (contentResultId) {
+				output += `\nContent fetching in background (contentResultId: ${contentResultId}). Not ready yet; will notify when ready.`;
 			}
 		}
 
