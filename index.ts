@@ -9,8 +9,8 @@ import type { ResolvedSearchProvider, SearchProvider, SearchResult } from "./sea
 import { webSearch } from "./web-search.ts";
 import { formatSeconds, getWebSearchConfigDir, getWebSearchConfigPath } from "./utils.ts";
 import {
-	contentRetrievalCall,
 	createStoredResultStore,
+	storedResultRetrievalCall,
 	type QueryResultData,
 } from "./storage.ts";
 import { activityMonitor, type ActivityEntry } from "./activity.ts";
@@ -300,17 +300,6 @@ function hasFullInlineCoverage(urls: string[], inlineContent: ExtractedContent[]
 	return urls.every(url => coveredUrls.has(url));
 }
 
-function formatFullResults(queryData: QueryResultData): string {
-	let output = `## Results for: "${queryData.query}"\n\n`;
-	if (queryData.answer) {
-		output += `${queryData.answer}\n\n---\n\n`;
-	}
-	for (const r of queryData.results) {
-		output += `### ${r.title}\n${r.url}\n\n`;
-	}
-	return output;
-}
-
 function closeCurator(callId?: string): void {
 	if (callId !== undefined) {
 		const win = glimpseWins.get(callId);
@@ -567,7 +556,7 @@ export default function (pi: ExtensionAPI) {
 				pi.sendMessage(
 					{
 						customType: "web-search-content-ready",
-						content: `Content fetched for ${ok}/${fetched.length} URLs (contentResultId: ${contentResultId}). Full page content now available. Use ${contentRetrievalCall(contentResultId)}.`,
+						content: `Content fetched for ${ok}/${fetched.length} URLs (contentResultId: ${contentResultId}). Full page content now available. Use ${storedResultRetrievalCall(contentResultId)}.`,
 						display: true,
 					},
 					{ triggerTurn: true },
@@ -859,7 +848,7 @@ export default function (pi: ExtensionAPI) {
 			searchResultId = published.searchResultId;
 			contentResultId = published.contentResultId;
 			if (!hasApprovedSummary) {
-				output += `---\nFull content for ${opts.inlineContent.length} sources available (contentResultId: ${contentResultId}). Use ${contentRetrievalCall(contentResultId)}.`;
+				output += `---\nFull content for ${opts.inlineContent.length} sources available (contentResultId: ${contentResultId}). Use ${storedResultRetrievalCall(contentResultId)}.`;
 			}
 		} else {
 			searchResultId = storedResultStore.createSearchResult(opts.results, pi);
@@ -868,6 +857,13 @@ export default function (pi: ExtensionAPI) {
 				if (contentResultId && !hasApprovedSummary) {
 					output += `---\nContent fetching in background (contentResultId: ${contentResultId}). Not ready yet; will notify when ready.`;
 				}
+			}
+		}
+
+		if (hasApprovedSummary) {
+			output += `\n\n---\nFull Web search results: ${storedResultRetrievalCall(searchResultId)}.`;
+			if (contentResultId && hasInlineReady) {
+				output += `\nFetched source content: ${storedResultRetrievalCall(contentResultId)}.`;
 			}
 		}
 
@@ -1549,6 +1545,7 @@ export default function (pi: ExtensionAPI) {
 				totalResults?: number;
 				error?: string;
 				contentResultId?: string;
+				searchResultId?: string;
 				fetchUrls?: string[];
 				phase?: string;
 				progress?: number;
@@ -1701,6 +1698,10 @@ export default function (pi: ExtensionAPI) {
 				}
 			}
 
+			if (details?.searchResultId) {
+				lines.push(theme.fg("dim", `searchResultId: ${details.searchResultId}`));
+			}
+
 			if (details?.fetchUrls && details.fetchUrls.length > 0) {
 				if (details.curated) {
 					lines.push(theme.fg("muted", `Fetching ${details.fetchUrls.length} URLs in background`));
@@ -1830,7 +1831,7 @@ export default function (pi: ExtensionAPI) {
 
 				if (truncated) {
 					output += `\n\n---\nShowing ${MAX_INLINE_CONTENT} of ${fullLength} chars. ` +
-						`Use ${contentRetrievalCall(contentResultId)} for full content.`;
+						`Use ${storedResultRetrievalCall(contentResultId)} for full content.`;
 				}
 
 				const content: Array<{ type: string; text?: string; data?: string; mimeType?: string }> = [];
@@ -1874,7 +1875,7 @@ export default function (pi: ExtensionAPI) {
 					output += `- ${title || url} (${content.length} chars)\n`;
 				}
 			}
-			output += `\n---\nUse ${contentRetrievalCall(contentResultId)} to retrieve full content.`;
+			output += `\n---\nUse ${storedResultRetrievalCall(contentResultId)} to retrieve full content.`;
 
 			return {
 				content: [{ type: "text", text: output }],
@@ -2033,51 +2034,15 @@ export default function (pi: ExtensionAPI) {
 			});
 			if (contentResult) return contentResult;
 
-			const data = storedResultStore.get(params.resultId);
-			if (data?.type === "search" && data.queries) {
-				let queryData: QueryResultData | undefined;
-
-				if (params.query !== undefined) {
-					queryData = data.queries.find((q) => q.query === params.query);
-					if (!queryData) {
-						const available = data.queries.map((q) => `"${q.query}"`).join(", ");
-						return {
-							content: [{ type: "text", text: `Query "${params.query}" not found. Available: ${available}` }],
-							details: { error: "Query not found" },
-						};
-					}
-				} else if (params.queryIndex !== undefined) {
-					queryData = data.queries[params.queryIndex];
-					if (!queryData) {
-						return {
-							content: [{ type: "text", text: `Index ${params.queryIndex} out of range (0-${data.queries.length - 1})` }],
-							details: { error: "Index out of range" },
-						};
-					}
-				} else {
-					const available = data.queries.map((q, i) => `${i}: "${q.query}"`).join(", ");
-					return {
-						content: [{ type: "text", text: `Specify query or queryIndex. Available: ${available}` }],
-						details: { error: "No query specified" },
-					};
-				}
-
-				if (queryData.error) {
-					return {
-						content: [{ type: "text", text: `Error for "${queryData.query}": ${queryData.error}` }],
-						details: { error: queryData.error, query: queryData.query },
-					};
-				}
-
-				return {
-					content: [{ type: "text", text: formatFullResults(queryData) }],
-					details: { query: queryData.query, resultCount: queryData.results.length },
-				};
-			}
+			const searchResult = storedResultStore.retrieveSearchResult(params.resultId, {
+				query: params.query,
+				queryIndex: params.queryIndex,
+			});
+			if (searchResult) return searchResult;
 
 			return {
-				content: [{ type: "text", text: "Invalid stored data format" }],
-				details: { error: "Invalid data" },
+				content: [{ type: "text", text: `Error: No stored result for resultId "${params.resultId}".` }],
+				details: { error: "Not found", resultId: params.resultId },
 			};
 		},
 
@@ -2103,6 +2068,7 @@ export default function (pi: ExtensionAPI) {
 				error?: string;
 				resultId?: string;
 				query?: string;
+				queries?: string[];
 				urls?: string[];
 				url?: string;
 				title?: string;
@@ -2114,6 +2080,7 @@ export default function (pi: ExtensionAPI) {
 				const extras: string[] = [];
 				if (details.resultId) extras.push(`resultId: ${details.resultId}`);
 				if (details.query) extras.push(`query: ${details.query}`);
+				if (details.queries) extras.push(...details.queries.map((query, index) => `${index}: ${query}`));
 				if (details.url) extras.push(`url: ${details.url}`);
 				else if (details.title) extras.push(`resource: ${details.title}`);
 				if (details.urls) extras.push(...details.urls.map((url, index) => `${index}: ${url}`));
@@ -2125,6 +2092,8 @@ export default function (pi: ExtensionAPI) {
 			let statusLine: string;
 			if (details?.query) {
 				statusLine = theme.fg("success", `"${details.query}"`) + theme.fg("muted", ` (${details.resultCount} results)`);
+			} else if (details?.queries) {
+				statusLine = theme.fg("success", `resultId: ${details.resultId}`) + theme.fg("muted", ` (${details.queries.length} queries)`);
 			} else if (details?.urls) {
 				statusLine = theme.fg("success", `resultId: ${details.resultId}`) + theme.fg("muted", ` (${details.urls.length} URLs)`);
 			} else {

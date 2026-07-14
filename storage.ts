@@ -41,24 +41,34 @@ interface ContentSelector {
 	urlIndex?: number;
 }
 
-interface ContentRetrievalResult {
+interface SearchSelector {
+	query?: string;
+	queryIndex?: number;
+}
+
+interface StoredRetrievalDetails {
+	error?: string;
+	resultId: string;
+	queries?: string[];
+	query?: string;
+	resultCount?: number;
+	urls?: string[];
+	url?: string;
+	title?: string;
+	contentLength?: number;
+}
+
+interface StoredRetrievalResult {
 	content: Array<{ type: "text"; text: string }>;
-	details: {
-		error?: string;
-		resultId?: string;
-		urls?: string[];
-		url?: string;
-		title?: string;
-		contentLength?: number;
-	};
+	details: StoredRetrievalDetails;
 }
 
 function generateId(): string {
 	return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 }
 
-export function contentRetrievalCall(contentResultId: string): string {
-	return `get_search_content({ resultId: "${contentResultId}" })`;
+export function storedResultRetrievalCall(resultId: string): string {
+	return `get_search_content({ resultId: "${resultId}" })`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -204,7 +214,7 @@ export function createStoredResultStore() {
 	function retrieveContentResult(
 		resultId: string,
 		selector: ContentSelector,
-	): ContentRetrievalResult | null {
+	): StoredRetrievalResult | null {
 		const data = storedResults.get(resultId);
 		if (!data) {
 			return {
@@ -261,6 +271,58 @@ export function createStoredResultStore() {
 		};
 	}
 
+	function retrieveSearchResult(
+		resultId: string,
+		selector: SearchSelector,
+	): StoredRetrievalResult | null {
+		const data = storedResults.get(resultId);
+		if (!data || data.type !== "search") return null;
+
+		const queries = data.queries.map((item) => item.query);
+		const available = queries.map((query, index) => `${index}: "${query}"`).join("\n  ");
+		let queryData: QueryResultData | undefined;
+
+		if (selector.query !== undefined) {
+			queryData = data.queries.find((item) => item.query === selector.query);
+			if (!queryData) {
+				return {
+					content: [{ type: "text", text: `Query "${selector.query}" not found for resultId "${resultId}". Available:\n  ${available}` }],
+					details: { error: "Query not found", resultId, queries },
+				};
+			}
+		} else if (selector.queryIndex !== undefined) {
+			queryData = data.queries[selector.queryIndex];
+			if (!queryData) {
+				return {
+					content: [{ type: "text", text: `queryIndex ${selector.queryIndex} is out of range for resultId "${resultId}". Available:\n  ${available}` }],
+					details: { error: "Index out of range", resultId, queries },
+				};
+			}
+		} else if (data.queries.length === 1) {
+			queryData = data.queries[0];
+		} else {
+			return {
+				content: [{ type: "text", text: `Choose a query with query or queryIndex for resultId "${resultId}". Available:\n  ${available}` }],
+				details: { resultId, queries },
+			};
+		}
+
+		if (queryData.error) {
+			return {
+				content: [{ type: "text", text: `Stored search failed for resultId "${resultId}" at query "${queryData.query}": ${queryData.error}` }],
+				details: { error: queryData.error, resultId, query: queryData.query },
+			};
+		}
+
+		let output = `## Results for: "${queryData.query}"\n\n`;
+		if (queryData.answer) output += `${queryData.answer}\n\n---\n\n`;
+		for (const result of queryData.results) output += `### ${result.title}\n${result.url}\n\n`;
+		return {
+			content: [{ type: "text", text: output }],
+			details: { resultId, query: queryData.query, resultCount: queryData.results.length },
+		};
+	}
+
 	function restoreFromSession(ctx: ExtensionContext): void {
 		storedResults.clear();
 		const now = Date.now();
@@ -293,5 +355,6 @@ export function createStoredResultStore() {
 		reserveContentResultId: generateId,
 		restoreFromSession,
 		retrieveContentResult,
+		retrieveSearchResult,
 	};
 }
