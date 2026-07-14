@@ -275,4 +275,20 @@ test("registered fetched-content renderers use contentResultId and resultId labe
 	const choicesText = renderText(tools.getSearchContent.renderResult(choices, { expanded: true, isPartial: false }, plainTheme));
 	assert.match(choicesText, new RegExp(`resultId: ${many.details.contentResultId}`));
 	assert.doesNotMatch(choicesText, /responseId|response id/i);
+
+	const unknownUrl = await tools.getSearchContent.execute("render-unknown-url", {
+		resultId: many.details.contentResultId,
+		url: "http://127.0.0.1/render-unknown",
+	});
+	const unknownUrlText = renderText(tools.getSearchContent.renderResult(unknownUrl, { expanded: true, isPartial: false }, plainTheme));
+	assert.match(unknownUrlText, new RegExp(`0: ${firstUrl}`));
+	assert.match(unknownUrlText, new RegExp(`1: ${secondUrl}`));
+
+	const outOfRange = await tools.getSearchContent.execute("render-bad-index", {
+		resultId: many.details.contentResultId,
+		urlIndex: 3,
+	});
+	const outOfRangeText = renderText(tools.getSearchContent.renderResult(outOfRange, { expanded: true, isPartial: false }, plainTheme));
+	assert.match(outOfRangeText, new RegExp(`0: ${firstUrl}`));
+	assert.match(outOfRangeText, new RegExp(`1: ${secondUrl}`));
 });

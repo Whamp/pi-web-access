@@ -21,7 +21,7 @@ import {
 	retrieveContentResult,
 	storeResult,
 	type QueryResultData,
-	type StoredSearchData,
+	type StoredResultData,
 } from "./storage.ts";
 import { activityMonitor, type ActivityEntry } from "./activity.ts";
 import { startCuratorServer, type CuratorServerHandle } from "./curator-server.ts";
@@ -534,19 +534,19 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	async function fetchAndPublishInBackground(
-		fetchId: string,
+		contentResultId: string,
 		urls: string[],
 		controller: AbortController,
 	): Promise<void> {
 		try {
 			const fetched = await fetchAllContent(urls, controller.signal);
-			if (!sessionActive || !pendingFetches.has(fetchId)) return;
-			createContentResult(fetched, pi, fetchId);
+			if (!sessionActive || !pendingFetches.has(contentResultId)) return;
+			createContentResult(fetched, pi, contentResultId);
 			const ok = fetched.filter(f => !f.error).length;
 			pi.sendMessage(
 				{
 					customType: "web-search-content-ready",
-					content: `Content fetched for ${ok}/${fetched.length} URLs [${fetchId}]. Full page content now available.`,
+					content: `Content fetched for ${ok}/${fetched.length} URLs [${contentResultId}]. Full page content now available.`,
 					display: true,
 				},
 				{ triggerTurn: true },
@@ -557,7 +557,7 @@ export default function (pi: ExtensionAPI) {
 				abortPendingFetches();
 				return;
 			}
-			if (!sessionActive || !pendingFetches.has(fetchId)) return;
+			if (!sessionActive || !pendingFetches.has(contentResultId)) return;
 			const message = error instanceof Error ? error.message : String(error);
 			const isAbort = (error instanceof Error && error.name === "AbortError") || message.toLowerCase().includes("abort");
 			if (isAbort) return;
@@ -565,7 +565,7 @@ export default function (pi: ExtensionAPI) {
 				pi.sendMessage(
 					{
 						customType: "web-search-error",
-						content: `Content fetch failed [${fetchId}]: ${message}`,
+						content: `Content fetch failed [${contentResultId}]: ${message}`,
 						display: true,
 					},
 					{ triggerTurn: false },
@@ -576,22 +576,22 @@ export default function (pi: ExtensionAPI) {
 				abortPendingFetches();
 			}
 		} finally {
-			pendingFetches.delete(fetchId);
+			pendingFetches.delete(contentResultId);
 		}
 	}
 
 	function startBackgroundFetch(urls: string[]): string | null {
 		if (urls.length === 0) return null;
-		const fetchId = reserveContentResultId();
+		const contentResultId = reserveContentResultId();
 		const controller = new AbortController();
-		pendingFetches.set(fetchId, controller);
-		void fetchAndPublishInBackground(fetchId, urls, controller);
-		return fetchId;
+		pendingFetches.set(contentResultId, controller);
+		void fetchAndPublishInBackground(contentResultId, urls, controller);
+		return contentResultId;
 	}
 
 	function storeAndPublishSearch(results: QueryResultData[]): string {
 		const id = generateId();
-		const data: StoredSearchData = {
+		const data: StoredResultData = {
 			id, type: "search", timestamp: Date.now(), queries: results,
 		};
 		storeResult(id, data);
@@ -2117,6 +2117,7 @@ export default function (pi: ExtensionAPI) {
 				if (details.query) extras.push(`query: ${details.query}`);
 				if (details.url) extras.push(`url: ${details.url}`);
 				else if (details.title) extras.push(`resource: ${details.title}`);
+				if (details.urls) extras.push(...details.urls.map((url, index) => `${index}: ${url}`));
 				const plan = buildSearchErrorPlan({ error: details.error, extraLines: extras });
 				if (plan) return renderSearchErrorPlan(plan, expanded, theme);
 				return new Text(theme.fg("error", `Error: ${details.error}`), 0, 0);

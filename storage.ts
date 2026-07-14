@@ -12,7 +12,7 @@ export interface QueryResultData {
 	provider?: string;
 }
 
-export interface StoredSearchData {
+export interface StoredResultData {
 	id: string;
 	type: "search" | "fetch";
 	timestamp: number;
@@ -20,13 +20,13 @@ export interface StoredSearchData {
 	urls?: ExtractedContent[];
 }
 
-const storedResults = new Map<string, StoredSearchData>();
+const storedResults = new Map<string, StoredResultData>();
 
 export function generateId(): string {
 	return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 }
 
-export function storeResult(id: string, data: StoredSearchData): void {
+export function storeResult(id: string, data: StoredResultData): void {
 	storedResults.set(id, data);
 }
 
@@ -55,7 +55,7 @@ function publishContentResult(
 	publisher: ContentPublisher,
 ): void {
 	const storedUrls = urls.map(({ thumbnail: _thumbnail, frames: _frames, ...url }) => url);
-	const data: StoredSearchData = {
+	const data: StoredResultData = {
 		id: contentResultId,
 		type: "fetch",
 		timestamp: Date.now(),
@@ -142,11 +142,11 @@ export function retrieveContentResult(
 	};
 }
 
-export function getResult(id: string): StoredSearchData | null {
+export function getResult(id: string): StoredResultData | null {
 	return storedResults.get(id) ?? null;
 }
 
-export function getAllResults(): StoredSearchData[] {
+export function getAllResults(): StoredResultData[] {
 	return Array.from(storedResults.values());
 }
 
@@ -158,7 +158,7 @@ export function clearResults(): void {
 	storedResults.clear();
 }
 
-function isValidStoredData(data: unknown): data is StoredSearchData {
+function isValidStoredData(data: unknown): data is StoredResultData {
 	if (!data || typeof data !== "object") return false;
 	const d = data as Record<string, unknown>;
 	if (typeof d.id !== "string" || !d.id) return false;
