@@ -337,3 +337,40 @@ test("/websearch explicitly starts the curator", async () => {
 	assert.deepEqual(runtime.notifications[0], { message: "Opening web search curator...", level: "info" });
 	await runtime.shutdown();
 });
+
+test("/websearch publishes a retrievable searchResultId after explicit summary approval", async () => {
+	installSearchResponse();
+	const runtime = await loadRuntime();
+	const command = runtime.extension.commands.get("websearch")?.handler;
+	const getSearchContent = runtime.extension.tools.get("get_search_content")?.definition;
+	assert.ok(command);
+	assert.ok(getSearchContent);
+
+	await command("curated reference query", runtime.context);
+	const fallbackNotice = runtime.notifications.find(({ message }) => message.includes("Open manually:"));
+	const curatorUrl = fallbackNotice?.message.match(/http:\/\/localhost:\d+\/\?session=[a-f0-9-]+/)?.[0];
+	assert.ok(curatorUrl);
+	const session = new URL(curatorUrl).searchParams.get("session");
+	assert.ok(session);
+	await new Promise((resolve) => setImmediate(resolve));
+
+	const submitted = await originalFetch(new URL("/submit", curatorUrl), {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ token: session, selected: [0], summary: "Approved explicit summary." }),
+	});
+	assert.equal(submitted.status, 200);
+	for (let attempt = 0; attempt < 100 && runtime.sent.length === 0; attempt += 1) {
+		await new Promise((resolve) => setTimeout(resolve, 2));
+	}
+
+	assert.equal(runtime.sent.length, 1);
+	const result = runtime.sent[0].message;
+	assert.equal(typeof result.details.searchResultId, "string");
+	assert.match(result.content[0].text, /Approved explicit summary/);
+	assert.match(result.content[0].text, new RegExp(`get_search_content\\(\\{ resultId: "${result.details.searchResultId}" \\}\\)`));
+	const retrieved = await getSearchContent.execute("retrieve-curated", {
+		resultId: result.details.searchResultId,
+	});
+	assert.match(retrieved.content[0].text, /Article/);
+});

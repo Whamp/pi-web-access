@@ -39,7 +39,7 @@ export interface SearchErrorDetails {
 	queryCount?: number;
 	/** Partial per-query results gathered before the cancel/error. */
 	cancelledQueries?: CancelledQueryDetail[];
-	/** Arbitrary extra diagnostic lines (e.g. URLs, response id) for non-cancel errors
+	/** Arbitrary extra diagnostic lines (e.g. URLs, result references) for non-cancel errors
 	 * like fetch_content / get_search_content. Shown in the expanded view. */
 	extraLines?: string[];
 }
@@ -76,7 +76,7 @@ export function buildSearchErrorPlan(details: SearchErrorDetails | undefined | n
 
 	// Rich diagnostics only make sense when there is something to diagnose: a
 	// cancelled/curator result with partial data, OR a non-cancel error that carries
-	// extra detail (urls/response-id for fetch_content, the failed query for
+	// extra detail (URLs/result references for fetch_content, the failed query for
 	// get_search_content). A bare argument error (e.g. "No URL
 	// provided") stays a clean single line -- no noise.
 	const extras = details.extraLines ?? [];

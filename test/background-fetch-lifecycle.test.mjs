@@ -173,14 +173,13 @@ test("full-content web search waits and stores content before terminal resolutio
 
 	contentGate.resolve();
 	const result = await execution;
-	assert.ok(result.details.fetchId);
+	assert.ok(result.details.contentResultId);
 	assert.equal(result.details.contentReady, 1);
 	assert.equal(result.details.contentErrors, 0);
-	assert.equal(result.details.fetchUrls, undefined);
 	assert.ok(updates.some((update) => update.details?.phase === "content"));
 	const retrieved = await tool(runtime.extension, "get_search_content").execute(
 		"retrieve",
-		{ responseId: result.details.fetchId, urlIndex: 0 },
+		{ resultId: result.details.contentResultId, urlIndex: 0 },
 	);
 	assert.equal(retrieved.details.error, undefined);
 	assert.match(retrieved.content[0].text, /# Article/);
@@ -221,7 +220,7 @@ test("web search without full content skips the content phase", async () => {
 		runtime.context,
 	);
 
-	assert.equal(result.details.fetchId, null);
+	assert.equal(result.details.contentResultId, null);
 	assert.equal(contentRequests, 0);
 	assert.equal(updates.some((update) => update.details?.phase === "content"), false);
 });
@@ -260,8 +259,8 @@ test("content deadline retains completed sources and terminally abandons a non-s
 
 		assert.equal(result.details.contentReady, 1);
 		assert.equal(result.details.contentErrors, 1);
-		const fast = await tool(runtime.extension, "get_search_content").execute("fast", { responseId: result.details.fetchId, urlIndex: 0 });
-		const slow = await tool(runtime.extension, "get_search_content").execute("slow", { responseId: result.details.fetchId, urlIndex: 1 });
+		const fast = await tool(runtime.extension, "get_search_content").execute("fast", { resultId: result.details.contentResultId, urlIndex: 0 });
+		const slow = await tool(runtime.extension, "get_search_content").execute("slow", { resultId: result.details.contentResultId, urlIndex: 1 });
 		assert.match(fast.content[0].text, /# Fast/);
 		assert.match(slow.details.error, /timed out after 60 seconds/);
 		assert.ok(updates.some((update) => update.details?.phase === "content" && update.details.completed === 1 && update.details.failed === 1 && update.details.remaining === 0));
@@ -1132,7 +1131,7 @@ test("duplicate source URLs are fetched and stored once in first-result order", 
 	);
 	assert.equal(contentRequests, 1);
 	assert.equal(result.details.contentReady, 1);
-	const outOfRange = await tool(runtime.extension, "get_search_content").execute("second", { responseId: result.details.fetchId, urlIndex: 1 });
+	const outOfRange = await tool(runtime.extension, "get_search_content").execute("second", { resultId: result.details.contentResultId, urlIndex: 1 });
 	assert.equal(outOfRange.details.error, "Index out of range");
 });
 
@@ -1164,8 +1163,8 @@ test("provider-inline and retrieved content share one ordered continuation ident
 	assert.ok(contentRequests.some((url) => url.includes("127.0.0.1/missing")));
 	assert.equal(result.details.contentReady, 2);
 	assert.equal(result.details.contentErrors, 0);
-	const inline = await tool(runtime.extension, "get_search_content").execute("inline", { responseId: result.details.fetchId, urlIndex: 0 });
-	const missing = await tool(runtime.extension, "get_search_content").execute("missing", { responseId: result.details.fetchId, urlIndex: 1 });
+	const inline = await tool(runtime.extension, "get_search_content").execute("inline", { resultId: result.details.contentResultId, urlIndex: 0 });
+	const missing = await tool(runtime.extension, "get_search_content").execute("missing", { resultId: result.details.contentResultId, urlIndex: 1 });
 	assert.match(inline.content[0].text, /Provider supplied content/);
 	assert.match(missing.content[0].text, /# Missing/);
 });
@@ -1217,11 +1216,11 @@ test("mixed inline, retrieved, failed, timed-out, and duplicate sources share on
 		assert.equal(contentRequests.filter((url) => url === "https://r.jina.ai/http://127.0.0.1/success").length, 1);
 		assert.equal(result.details.contentReady, 2);
 		assert.equal(result.details.contentErrors, 2);
-		const inline = await tool(runtime.extension, "get_search_content").execute("mixed-inline", { responseId: result.details.fetchId, urlIndex: 0 });
-		const success = await tool(runtime.extension, "get_search_content").execute("mixed-success", { responseId: result.details.fetchId, urlIndex: 1 });
-		const failure = await tool(runtime.extension, "get_search_content").execute("mixed-failure", { responseId: result.details.fetchId, urlIndex: 2 });
-		const timeout = await tool(runtime.extension, "get_search_content").execute("mixed-timeout", { responseId: result.details.fetchId, urlIndex: 3 });
-		const duplicate = await tool(runtime.extension, "get_search_content").execute("mixed-duplicate", { responseId: result.details.fetchId, urlIndex: 4 });
+		const inline = await tool(runtime.extension, "get_search_content").execute("mixed-inline", { resultId: result.details.contentResultId, urlIndex: 0 });
+		const success = await tool(runtime.extension, "get_search_content").execute("mixed-success", { resultId: result.details.contentResultId, urlIndex: 1 });
+		const failure = await tool(runtime.extension, "get_search_content").execute("mixed-failure", { resultId: result.details.contentResultId, urlIndex: 2 });
+		const timeout = await tool(runtime.extension, "get_search_content").execute("mixed-timeout", { resultId: result.details.contentResultId, urlIndex: 3 });
+		const duplicate = await tool(runtime.extension, "get_search_content").execute("mixed-duplicate", { resultId: result.details.contentResultId, urlIndex: 4 });
 		assert.match(inline.content[0].text, /Provider supplied content/);
 		assert.match(success.content[0].text, /# Success/);
 		assert.match(failure.details.error, /HTTP 502/);

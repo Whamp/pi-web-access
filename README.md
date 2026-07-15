@@ -126,7 +126,7 @@ web_search({ query: "release notes", workflow: "auto-summary" })
 
 With `includeContent: true`, `web_search` runs a bounded 60-second content phase before returning. It retains provider-supplied inline content and retrieves only missing sources, de-duplicated in first-result order. A deadline returns completed content plus a local timeout error for each unfinished source.
 
-The result details expose one continuation as `fetchId`, with `contentReady` and `contentErrors` counts for the merged set. Call `get_search_content` immediately with that `fetchId`; no background fetch or delayed follow-up is pending.
+The result details expose saved Web search results as `searchResultId`. When full content was requested, they expose the merged content as `contentResultId`, with `contentReady` and `contentErrors` counts. Pass either reference to `get_search_content` as `resultId`; the content reference is ready when `web_search` returns, with no delayed follow-up.
 
 ### `fetch_content`
 
@@ -152,12 +152,30 @@ fetch_content({ url: "/path/to/video.mp4", frames: 6 })
 
 ### `get_search_content`
 
-Retrieve full content stored by an earlier search or fetch.
+Retrieve full results stored by an earlier search or fetch. `web_search` publishes Web search records as `searchResultId`. It may also publish fetched source content as a separate `contentResultId`. `fetch_content` publishes fetched source content as `contentResultId`. Pass either value to `get_search_content` as `resultId`.
+
+A one-item record needs no selector:
 
 ```typescript
-get_search_content({ responseId: "abc123", urlIndex: 0 })
-get_search_content({ responseId: "abc123", url: "https://example.com" })
-get_search_content({ responseId: "abc123", query: "original query" })
+web_search({ query: "TypeScript error handling" })
+// Use the searchResultId from the result:
+get_search_content({ resultId: "<searchResultId>" })
+
+fetch_content({ url: "https://example.com/article" })
+// Use the contentResultId from the result:
+get_search_content({ resultId: "<contentResultId>" })
+```
+
+For a multi-item record, call the tool without a selector to list the indexed choices, then select one by value or index:
+
+```typescript
+get_search_content({ resultId: "<searchResultId>" })
+get_search_content({ resultId: "<searchResultId>", queryIndex: 1 })
+get_search_content({ resultId: "<searchResultId>", query: "original query" })
+
+get_search_content({ resultId: "<contentResultId>" })
+get_search_content({ resultId: "<contentResultId>", urlIndex: 1 })
+get_search_content({ resultId: "<contentResultId>", url: "https://example.com/article" })
 ```
 
 Large content is truncated in the immediate tool response but remains available through this tool.

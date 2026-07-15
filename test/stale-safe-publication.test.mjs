@@ -95,7 +95,7 @@ test("a successful web search publishes before its record is immediately retriev
 		fixture.entries.push({ customType, data });
 		const retrieval = tool(fixture.extension, "get_search_content").execute(
 			"retrieve-during-publication",
-			{ responseId: data.id, queryIndex: 0 },
+			{ resultId: data.id, queryIndex: 0 },
 		);
 		publishedBeforeRetrieval = retrieval.then((result) => result.details?.error === "Not found");
 	};
@@ -111,10 +111,10 @@ test("a successful web search publishes before its record is immediately retriev
 	assert.equal(await publishedBeforeRetrieval, true, "record must not enter the cache until publication succeeds");
 	assert.equal(fixture.entries.length, 1);
 	assert.equal(fixture.entries[0].customType, "web-search-results");
-	assert.equal(fixture.entries[0].data.id, result.details.searchId);
+	assert.equal(fixture.entries[0].data.id, result.details.searchResultId);
 	const retrieved = await tool(fixture.extension, "get_search_content").execute(
 		"retrieve",
-		{ responseId: result.details.searchId, queryIndex: 0 },
+		{ resultId: result.details.searchResultId, queryIndex: 0 },
 	);
 	assert.equal(retrieved.details.error, undefined);
 	assert.match(retrieved.content[0].text, /Article/);
@@ -135,7 +135,7 @@ test("stale search publication returns session-changed cancellation without an i
 
 	const retrieved = await tool(fixture.extension, "get_search_content").execute(
 		"retrieve-stale-search",
-		{ responseId: stalePublication.attemptedId, queryIndex: 0 },
+		{ resultId: stalePublication.attemptedId, queryIndex: 0 },
 	);
 	stalePublication.assertCancelledWithoutCachedRecord(result, retrieved);
 });
@@ -157,7 +157,7 @@ test("stale full-content publication uses the same cancellation and cache behavi
 
 	const retrieved = await tool(fixture.extension, "get_search_content").execute(
 		"retrieve-stale-content",
-		{ responseId: stalePublication.attemptedId, urlIndex: 0 },
+		{ resultId: stalePublication.attemptedId, urlIndex: 0 },
 	);
 	stalePublication.assertCancelledWithoutCachedRecord(result, retrieved);
 	assert.match(result.content[0].text, /Content retrieval cancelled because the session changed\./);

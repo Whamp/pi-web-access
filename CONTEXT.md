@@ -19,3 +19,9 @@ A search that names one search provider, either in the request or as the saved d
 
 **Automatic provider selection**:
 A search that delegates provider choice by selecting `auto`, either in the request or as the saved default. It tries eligible providers in preference order after provider-specific failures; caller cancellation stops the search.
+
+**Stored result reference**:
+An opaque identifier for one stored Web search or fetched source content record. Pass either kind to `get_search_content` as `resultId`.
+
+**Content result reference**:
+A Stored result reference for a fetched source content record. Producers expose it as `contentResultId`.

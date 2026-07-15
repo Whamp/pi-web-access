@@ -9,15 +9,9 @@ import type { ResolvedSearchProvider, SearchProvider, SearchResult } from "./sea
 import { webSearch } from "./web-search.ts";
 import { formatSeconds, getWebSearchConfigDir, getWebSearchConfigPath } from "./utils.ts";
 import {
-	clearResults,
-	deleteResult,
-	generateId,
-	getAllResults,
-	getResult,
-	restoreFromSession,
-	storeResult,
+	createStoredResultStore,
+	storedResultRetrievalCall,
 	type QueryResultData,
-	type StoredSearchData,
 } from "./storage.ts";
 import { activityMonitor, type ActivityEntry } from "./activity.ts";
 import { startCuratorServer, type CuratorServerHandle } from "./curator-server.ts";
@@ -286,10 +280,6 @@ function isStaleExtensionContextError(error: unknown): boolean {
 	return error instanceof Error && error.message.includes("extension ctx is stale");
 }
 
-function stripThumbnails(results: ExtractedContent[]): ExtractedContent[] {
-	return results.map(({ thumbnail, frames, ...rest }) => rest);
-}
-
 function formatSearchSummary(results: SearchResult[], answer: string): string {
 	let output = answer ? `${answer}\n\n---\n\n**Sources:**\n` : "";
 	output += results.map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}`).join("\n\n");
@@ -311,17 +301,6 @@ function duplicateQuerySet(results: QueryResultData[]): Set<string> {
 function formatQueryHeader(query: string, provider: string | undefined, duplicateQueries: Set<string>): string {
 	const suffix = duplicateQueries.has(query) && provider ? ` (${provider})` : "";
 	return `## Query: "${query}"${suffix}\n\n`;
-}
-
-function formatFullResults(queryData: QueryResultData): string {
-	let output = `## Results for: "${queryData.query}"\n\n`;
-	if (queryData.answer) {
-		output += `${queryData.answer}\n\n---\n\n`;
-	}
-	for (const r of queryData.results) {
-		output += `### ${r.title}\n${r.url}\n\n`;
-	}
-	return output;
 }
 
 function closeCurator(callId?: string): void {
@@ -506,6 +485,7 @@ function formatEntryLine(
 }
 
 export default function (pi: ExtensionAPI) {
+	const storedResultStore = createStoredResultStore();
 	const initConfig = loadConfigForExtensionInit();
 	const curateKey = initConfig.shortcuts?.curate || DEFAULT_SHORTCUTS.curate;
 	const activityKey = initConfig.shortcuts?.activity || DEFAULT_SHORTCUTS.activity;
@@ -522,7 +502,7 @@ export default function (pi: ExtensionAPI) {
 		abortActiveSearches();
 		closeCurator();
 		clearCloneCache();
-		restoreFromSession(ctx);
+		storedResultStore.restoreFromSession(ctx);
 		// Unsubscribe before clear() to avoid callback with stale ctx
 		widgetUnsubscribe?.();
 		widgetUnsubscribe = null;
@@ -534,16 +514,6 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
-	function publishStoredResult(data: StoredSearchData): boolean {
-		try {
-			pi.appendEntry("web-search-results", data);
-		} catch (error) {
-			if (isStaleExtensionContextError(error)) return false;
-			throw error;
-		}
-		storeResult(data.id, data);
-		return true;
-	}
 
 	function buildSessionChangedCancellation(operation = "Web search"): {
 		content: Array<{ type: "text"; text: string }>;
@@ -637,13 +607,6 @@ export default function (pi: ExtensionAPI) {
 		});
 	}
 
-	function storeAndPublishSearch(results: QueryResultData[]): string | null {
-		const id = generateId();
-		const data: StoredSearchData = {
-			id, type: "search", timestamp: Date.now(), queries: results,
-		};
-		return publishStoredResult(data) ? id : null;
-	}
 
 	interface SearchReturnOptions {
 		queryList: string[];
@@ -903,22 +866,31 @@ export default function (pi: ExtensionAPI) {
 			}
 		}
 
-		let fetchId: string | null = null;
 		const storedContent = opts.includeContent ? opts.inlineContent : undefined;
-		if (storedContent) {
-			fetchId = generateId();
-			const data: StoredSearchData = {
-				id: fetchId,
-				type: "fetch",
-				timestamp: Date.now(),
-				urls: stripThumbnails(storedContent),
-			};
-			if (!publishStoredResult(data)) return buildSessionChangedCancellation();
-			if (!hasApprovedSummary) output += `---\nFull content for ${storedContent.filter(item => !item.error).length}/${storedContent.length} sources available [${fetchId}].`;
+		let searchResultId: string;
+		let contentResultId: string | null = null;
+		try {
+			if (storedContent) {
+				const published = storedResultStore.createSearchWithContentResults(opts.results, storedContent, pi);
+				searchResultId = published.searchResultId;
+				contentResultId = published.contentResultId;
+			} else {
+				searchResultId = storedResultStore.createSearchResult(opts.results, pi);
+			}
+		} catch (error) {
+			if (isStaleExtensionContextError(error)) return buildSessionChangedCancellation();
+			throw error;
 		}
 
-		const searchId = storeAndPublishSearch(opts.results);
-		if (searchId === null) return buildSessionChangedCancellation();
+		if (hasApprovedSummary) {
+			output += `\n\n---\nFull Web search results: ${storedResultRetrievalCall(searchResultId)}.`;
+			if (contentResultId) {
+				output += `\nFetched source content: ${storedResultRetrievalCall(contentResultId)}.`;
+			}
+		} else if (contentResultId && storedContent) {
+			const ready = storedContent.filter(item => !item.error).length;
+			output += `---\nFull content for ${ready}/${storedContent.length} sources available (contentResultId: ${contentResultId}). Use ${storedResultRetrievalCall(contentResultId)}.`;
+		}
 
 		const content: Array<{ type: "text"; text: string }> = [{ type: "text", text: output.trim() }];
 		return {
@@ -929,10 +901,10 @@ export default function (pi: ExtensionAPI) {
 				successfulQueries: sc,
 				totalResults: tr,
 				includeContent: opts.includeContent,
-				fetchId,
+				contentResultId,
 				contentReady: storedContent?.filter(item => !item.error).length ?? 0,
 				contentErrors: storedContent?.filter(item => item.error).length ?? 0,
-				searchId,
+				searchResultId,
 				...(opts.curated ? {
 					curated: true,
 					curatedFrom: opts.curatedFrom,
@@ -1256,7 +1228,7 @@ export default function (pi: ExtensionAPI) {
 		abortActiveSearches();
 		closeCurator();
 		clearCloneCache();
-		clearResults();
+		storedResultStore.clear();
 		// Unsubscribe before clear() to avoid callback with stale ctx
 		widgetUnsubscribe?.();
 		widgetUnsubscribe = null;
@@ -1268,9 +1240,9 @@ export default function (pi: ExtensionAPI) {
 		name: "web_search",
 		label: "Web Search",
 		description:
-			`Search the web using OpenAI, Brave, Parallel, Tavily, Exa, Perplexity, or Gemini. Returns an AI-synthesized answer with source citations. OpenAI web_search uses a Codex subscription or OpenAI API key. For comprehensive research, prefer queries (plural) with 2-4 varied angles over a single query — each query gets its own synthesized answer, so varying phrasing and scope gives much broader coverage. When includeContent is true, full page content is fetched before the tool returns. Agent searches never open the browser curator; use /websearch for deliberate browser curation or workflow "auto-summary" for a model-generated summary. Provider auto-selects: OpenAI when suitable and available, then Exa, Brave, Parallel, Tavily, Perplexity, Gemini API, then Gemini Web.`,
+			`Search the web using OpenAI, Brave, Parallel, Tavily, Exa, Perplexity, or Gemini. Returns an AI-synthesized answer with source citations. OpenAI web_search uses a Codex subscription or OpenAI API key. For comprehensive research, prefer queries (plural) with 2-4 varied angles over a single query — each query gets its own synthesized answer, so varying phrasing and scope gives much broader coverage. When includeContent is true, full page content is fetched before the tool returns. Agent searches never open the browser curator; use /websearch for deliberate browser curation or workflow "auto-summary" for a model-generated summary. Provider auto-selects: OpenAI when suitable and available, then Exa, Brave, Parallel, Tavily, Perplexity, Gemini API, then Gemini Web. Search results are stored under searchResultId and fetched source content under contentResultId; retrieve either with get_search_content({ resultId }).`,
 		promptSnippet:
-			"Use for web research questions. Prefer {queries:[...]} with 2-4 varied angles over a single query for broader coverage.",
+			"Use for web research questions. Prefer {queries:[...]} with 2-4 varied angles over a single query for broader coverage. Retrieve stored searchResultId or contentResultId references with get_search_content({ resultId }).",
 		parameters: Type.Object({
 			query: Type.Optional(Type.String({ description: "Single search query. For research tasks, prefer 'queries' with multiple varied angles instead." })),
 			queries: Type.Optional(Type.Array(Type.String(), { description: "Multiple queries searched in sequence, each returning its own synthesized answer. Prefer this for research — vary phrasing, scope, and angle across 2-4 queries to maximize coverage. Good: ['React vs Vue performance benchmarks 2026', 'React vs Vue developer experience comparison', 'React ecosystem size vs Vue ecosystem']. Bad: ['React vs Vue', 'React vs Vue comparison', 'React vs Vue review'] (too similar, redundant results)." })),
@@ -1441,7 +1413,8 @@ export default function (pi: ExtensionAPI) {
 				successfulQueries?: number;
 				totalResults?: number;
 				error?: string;
-				fetchId?: string;
+				contentResultId?: string;
+				searchResultId?: string;
 				contentReady?: number;
 				contentErrors?: number;
 				phase?: string;
@@ -1526,7 +1499,7 @@ export default function (pi: ExtensionAPI) {
 			if (details?.curated && details?.curatedFrom) {
 				statusLine += theme.fg("muted", ` (${details.queryCount}/${details.curatedFrom} queries curated)`);
 			}
-			if (details?.fetchId) {
+			if (details?.contentResultId) {
 				statusLine += theme.fg("muted", ` (${details.contentReady ?? 0} content ready, ${details.contentErrors ?? 0} errors)`);
 			}
 
@@ -1593,6 +1566,13 @@ export default function (pi: ExtensionAPI) {
 				}
 			}
 
+			if (details?.searchResultId) {
+				lines.push(theme.fg("dim", `searchResultId: ${details.searchResultId}`));
+			}
+			if (details?.contentResultId) {
+				lines.push(theme.fg("dim", `contentResultId: ${details.contentResultId}`));
+			}
+
 			const totalLines = lines.length;
 
 			if (!expanded) {
@@ -1644,9 +1624,9 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "fetch_content",
 		label: "Fetch Content",
-		description: "Fetch URL(s) and extract readable content as markdown. Supports YouTube video transcripts (with thumbnail), GitHub repository contents, and local video files (with frame thumbnail). Video frames can be extracted via timestamp/range or sampled across the entire video with frames alone. Falls back to Gemini for pages that block bots or fail Readability extraction. For YouTube and video files: ALWAYS pass the user's specific question via the prompt parameter — this directs the AI to focus on that aspect of the video, producing much better results than a generic extraction. Content is always stored and can be retrieved with get_search_content.",
+		description: "Fetch URL(s) and extract readable content as markdown. Supports YouTube video transcripts (with thumbnail), GitHub repository contents, and local video files (with frame thumbnail). Video frames can be extracted via timestamp/range or sampled across the entire video with frames alone. Falls back to Gemini for pages that block bots or fail Readability extraction. For YouTube and video files: ALWAYS pass the user's specific question via the prompt parameter — this directs the AI to focus on that aspect of the video, producing much better results than a generic extraction. Content is always stored under contentResultId and can be retrieved with get_search_content({ resultId }).",
 		promptSnippet:
-			"Use to extract readable content from URL(s), YouTube, GitHub repos, or local videos. For video questions, pass the user's exact question in prompt.",
+			"Use to extract readable content from URL(s), YouTube, GitHub repos, or local videos. Stored fetched content is identified by contentResultId. For video questions, pass the user's exact question in prompt.",
 		parameters: Type.Object({
 			url: Type.Optional(Type.String({ description: "Single URL to fetch" })),
 			urls: Type.Optional(Type.Array(Type.String(), { description: "Multiple URLs (parallel)" })),
@@ -1687,23 +1667,21 @@ export default function (pi: ExtensionAPI) {
 			const successful = fetchResults.filter((r) => !r.error).length;
 			const totalChars = fetchResults.reduce((sum, r) => sum + r.content.length, 0);
 
-			// ALWAYS store results (even for single URL)
-			const responseId = generateId();
-			const data: StoredSearchData = {
-				id: responseId,
-				type: "fetch",
-				timestamp: Date.now(),
-				urls: stripThumbnails(fetchResults),
-			};
-			if (!publishStoredResult(data)) return buildSessionChangedCancellation("Content retrieval");
+			let contentResultId: string;
+			try {
+				contentResultId = storedResultStore.createContentResult(fetchResults, pi);
+			} catch (error) {
+				if (isStaleExtensionContextError(error)) return buildSessionChangedCancellation("Content retrieval");
+				throw error;
+			}
 
-			// Single URL: return content directly (possibly truncated) with responseId
+			// Single URL: return content directly (possibly truncated) with contentResultId
 			if (urlList.length === 1) {
 				const result = fetchResults[0];
 				if (result.error) {
 					return {
 						content: [{ type: "text", text: `Error: ${result.error}` }],
-						details: { urls: urlList, urlCount: 1, successful: 0, error: result.error, responseId, prompt: params.prompt, timestamp: params.timestamp, frames: params.frames },
+						details: { urls: urlList, urlCount: 1, successful: 0, error: result.error, contentResultId, prompt: params.prompt, timestamp: params.timestamp, frames: params.frames },
 					};
 				}
 
@@ -1715,7 +1693,7 @@ export default function (pi: ExtensionAPI) {
 
 				if (truncated) {
 					output += `\n\n---\nShowing ${MAX_INLINE_CONTENT} of ${fullLength} chars. ` +
-						`Use get_search_content({ responseId: "${responseId}", urlIndex: 0 }) for full content.`;
+						`Use ${storedResultRetrievalCall(contentResultId)} for full content.`;
 				}
 
 				const content: Array<{ type: string; text?: string; data?: string; mimeType?: string }> = [];
@@ -1738,7 +1716,7 @@ export default function (pi: ExtensionAPI) {
 						successful: 1,
 						totalChars: fullLength,
 						title: result.title,
-						responseId,
+						contentResultId,
 						truncated,
 						hasImage: imageCount > 0,
 						imageCount,
@@ -1750,7 +1728,7 @@ export default function (pi: ExtensionAPI) {
 				};
 			}
 
-			// Multi-URL: existing behavior (summary + responseId)
+			// Multi-URL: return a summary plus the stored content reference.
 			let output = "## Fetched URLs\n\n";
 			for (const { url, title, content, error } of fetchResults) {
 				if (error) {
@@ -1759,11 +1737,11 @@ export default function (pi: ExtensionAPI) {
 					output += `- ${title || url} (${content.length} chars)\n`;
 				}
 			}
-			output += `\n---\nUse get_search_content({ responseId: "${responseId}", urlIndex: 0 }) to retrieve full content.`;
+			output += `\n---\nUse ${storedResultRetrievalCall(contentResultId)} to retrieve full content.`;
 
 			return {
 				content: [{ type: "text", text: output }],
-				details: { urls: urlList, urlCount: urlList.length, successful, totalChars, responseId },
+				details: { urls: urlList, urlCount: urlList.length, successful, totalChars, contentResultId },
 			};
 		},
 
@@ -1811,7 +1789,7 @@ export default function (pi: ExtensionAPI) {
 				error?: string;
 				title?: string;
 				truncated?: boolean;
-				responseId?: string;
+				contentResultId?: string;
 				phase?: string;
 				progress?: number;
 				hasImage?: boolean;
@@ -1834,7 +1812,7 @@ export default function (pi: ExtensionAPI) {
 				if (typeof fd.urlCount === "number" || typeof fd.successful === "number") {
 					extras.push(`urls: ${fd.successful ?? 0}/${fd.urlCount ?? 0} succeeded`);
 				}
-				if (fd.responseId) extras.push(`response id: ${fd.responseId}`);
+				if (fd.contentResultId) extras.push(`contentResultId: ${fd.contentResultId}`);
 				if (fd.urls && fd.urls.length > 0) {
 					for (const u of fd.urls.slice(0, 8)) extras.push(`  \u25b8 ${u}`);
 					if (fd.urls.length > 8) extras.push(`  ... and ${fd.urls.length - 8} more`);
@@ -1865,6 +1843,9 @@ export default function (pi: ExtensionAPI) {
 					return new Text(statusLine + "\n" + theme.fg("dim", brief), 0, 0);
 				}
 				const lines = [statusLine];
+				if (details?.contentResultId) {
+					lines.push(theme.fg("dim", `contentResultId: ${details.contentResultId}`));
+				}
 				if (details?.prompt) {
 					const display = details.prompt.length > 250 ? details.prompt.slice(0, 247) + "..." : details.prompt;
 					lines.push(theme.fg("dim", `  prompt: "${display}"`));
@@ -1887,18 +1868,21 @@ export default function (pi: ExtensionAPI) {
 			}
 			const textContent = result.content.find((c) => c.type === "text")?.text || "";
 			const preview = textContent.length > 500 ? textContent.slice(0, 500) + "..." : textContent;
-			return new Text(statusLine + "\n" + theme.fg("dim", preview), 0, 0);
+			const reference = details?.contentResultId
+				? theme.fg("dim", `contentResultId: ${details.contentResultId}`) + "\n"
+				: "";
+			return new Text(statusLine + "\n" + reference + theme.fg("dim", preview), 0, 0);
 		},
 	});
 
 	pi.registerTool({
 		name: "get_search_content",
 		label: "Get Search Content",
-		description: "Retrieve full content from a previous web_search or fetch_content call.",
+		description: "Retrieve full content from a previous web_search or fetch_content call by passing its stored reference as resultId.",
 		promptSnippet:
-			"Use after web_search/fetch_content when full stored content is needed via responseId plus query/url selectors.",
+			"Use after web_search/fetch_content when full stored content is needed via resultId plus query/url selectors.",
 		parameters: Type.Object({
-			responseId: Type.String({ description: "The responseId from web_search or fetch_content" }),
+			resultId: Type.String({ description: "The stored result reference from web_search or fetch_content" }),
 			query: Type.Optional(Type.String({ description: "Get content for this query (web_search)" })),
 			queryIndex: Type.Optional(Type.Number({ description: "Get content for query at index" })),
 			url: Type.Optional(Type.String({ description: "Get content for this URL" })),
@@ -1906,105 +1890,27 @@ export default function (pi: ExtensionAPI) {
 		}),
 
 		async execute(_toolCallId, params) {
-			const data = getResult(params.responseId);
-			if (!data) {
-				return {
-					content: [{ type: "text", text: `Error: No stored results for "${params.responseId}"` }],
-					details: { error: "Not found", responseId: params.responseId },
-				};
-			}
+			const contentResult = storedResultStore.retrieveContentResult(params.resultId, {
+				url: params.url,
+				urlIndex: params.urlIndex,
+			});
+			if (contentResult) return contentResult;
 
-			if (data.type === "search" && data.queries) {
-				let queryData: QueryResultData | undefined;
-
-				if (params.query !== undefined) {
-					queryData = data.queries.find((q) => q.query === params.query);
-					if (!queryData) {
-						const available = data.queries.map((q) => `"${q.query}"`).join(", ");
-						return {
-							content: [{ type: "text", text: `Query "${params.query}" not found. Available: ${available}` }],
-							details: { error: "Query not found" },
-						};
-					}
-				} else if (params.queryIndex !== undefined) {
-					queryData = data.queries[params.queryIndex];
-					if (!queryData) {
-						return {
-							content: [{ type: "text", text: `Index ${params.queryIndex} out of range (0-${data.queries.length - 1})` }],
-							details: { error: "Index out of range" },
-						};
-					}
-				} else {
-					const available = data.queries.map((q, i) => `${i}: "${q.query}"`).join(", ");
-					return {
-						content: [{ type: "text", text: `Specify query or queryIndex. Available: ${available}` }],
-						details: { error: "No query specified" },
-					};
-				}
-
-				if (queryData.error) {
-					return {
-						content: [{ type: "text", text: `Error for "${queryData.query}": ${queryData.error}` }],
-						details: { error: queryData.error, query: queryData.query },
-					};
-				}
-
-				return {
-					content: [{ type: "text", text: formatFullResults(queryData) }],
-					details: { query: queryData.query, resultCount: queryData.results.length },
-				};
-			}
-
-			if (data.type === "fetch" && data.urls) {
-				let urlData: ExtractedContent | undefined;
-
-				if (params.url !== undefined) {
-					urlData = data.urls.find((u) => u.url === params.url);
-					if (!urlData) {
-						const available = data.urls.map((u) => u.url).join("\n  ");
-						return {
-							content: [{ type: "text", text: `URL not found. Available:\n  ${available}` }],
-							details: { error: "URL not found" },
-						};
-					}
-				} else if (params.urlIndex !== undefined) {
-					urlData = data.urls[params.urlIndex];
-					if (!urlData) {
-						return {
-							content: [{ type: "text", text: `Index ${params.urlIndex} out of range (0-${data.urls.length - 1})` }],
-							details: { error: "Index out of range" },
-						};
-					}
-				} else {
-					const available = data.urls.map((u, i) => `${i}: ${u.url}`).join("\n  ");
-					return {
-						content: [{ type: "text", text: `Specify url or urlIndex. Available:\n  ${available}` }],
-						details: { error: "No URL specified" },
-					};
-				}
-
-				if (urlData.error) {
-					return {
-						content: [{ type: "text", text: `Error for ${urlData.url}: ${urlData.error}` }],
-						details: { error: urlData.error, url: urlData.url },
-					};
-				}
-
-				return {
-					content: [{ type: "text", text: `# ${urlData.title}\n\n${urlData.content}` }],
-					details: { url: urlData.url, title: urlData.title, contentLength: urlData.content.length },
-				};
-			}
+			const searchResult = storedResultStore.retrieveSearchResult(params.resultId, {
+				query: params.query,
+				queryIndex: params.queryIndex,
+			});
+			if (searchResult) return searchResult;
 
 			return {
-				content: [{ type: "text", text: "Invalid stored data format" }],
-				details: { error: "Invalid data" },
+				content: [{ type: "text", text: `Error: No stored result for resultId "${params.resultId}".` }],
+				details: { error: "Not found", resultId: params.resultId },
 			};
 		},
 
 		renderCall(args, theme) {
-			const { responseId, query, queryIndex, url, urlIndex } = args as {
-				responseId: string;
+			const { resultId, query, queryIndex, url, urlIndex } = args as {
+				resultId: string;
 				query?: string;
 				queryIndex?: number;
 				url?: string;
@@ -2015,13 +1921,17 @@ export default function (pi: ExtensionAPI) {
 			else if (queryIndex !== undefined) target = `queryIndex=${queryIndex}`;
 			else if (url) target = url.length > 30 ? url.slice(0, 27) + "..." : url;
 			else if (urlIndex !== undefined) target = `urlIndex=${urlIndex}`;
-			return new Text(theme.fg("toolTitle", theme.bold("get_content ")) + theme.fg("accent", target || responseId.slice(0, 8)), 0, 0);
+			else target = `resultId=${resultId}`;
+			return new Text(theme.fg("toolTitle", theme.bold("get_content ")) + theme.fg("accent", target), 0, 0);
 		},
 
 		renderResult(result, { expanded }, theme) {
 			const details = result.details as {
 				error?: string;
+				resultId?: string;
 				query?: string;
+				queries?: string[];
+				urls?: string[];
 				url?: string;
 				title?: string;
 				resultCount?: number;
@@ -2030,9 +1940,12 @@ export default function (pi: ExtensionAPI) {
 
 			if (details?.error) {
 				const extras: string[] = [];
+				if (details.resultId) extras.push(`resultId: ${details.resultId}`);
 				if (details.query) extras.push(`query: ${details.query}`);
+				if (details.queries) extras.push(...details.queries.map((query, index) => `${index}: ${query}`));
 				if (details.url) extras.push(`url: ${details.url}`);
 				else if (details.title) extras.push(`resource: ${details.title}`);
+				if (details.urls) extras.push(...details.urls.map((url, index) => `${index}: ${url}`));
 				const plan = buildSearchErrorPlan({ error: details.error, extraLines: extras });
 				if (plan) return renderSearchErrorPlan(plan, expanded, theme);
 				return new Text(theme.fg("error", `Error: ${details.error}`), 0, 0);
@@ -2041,6 +1954,10 @@ export default function (pi: ExtensionAPI) {
 			let statusLine: string;
 			if (details?.query) {
 				statusLine = theme.fg("success", `"${details.query}"`) + theme.fg("muted", ` (${details.resultCount} results)`);
+			} else if (details?.queries) {
+				statusLine = theme.fg("success", `resultId: ${details.resultId}`) + theme.fg("muted", ` (${details.queries.length} queries)`);
+			} else if (details?.urls) {
+				statusLine = theme.fg("success", `resultId: ${details.resultId}`) + theme.fg("muted", ` (${details.urls.length} URLs)`);
 			} else {
 				statusLine = theme.fg("success", details?.title || "Content") + theme.fg("muted", ` (${details?.contentLength ?? 0} chars)`);
 			}
@@ -2051,7 +1968,10 @@ export default function (pi: ExtensionAPI) {
 
 			const textContent = result.content.find((c) => c.type === "text")?.text || "";
 			const preview = textContent.length > 500 ? textContent.slice(0, 500) + "..." : textContent;
-			return new Text(statusLine + "\n" + theme.fg("dim", preview), 0, 0);
+			const reference = details?.resultId && !details.urls
+				? theme.fg("dim", `resultId: ${details.resultId}`) + "\n"
+				: "";
+			return new Text(statusLine + "\n" + reference + theme.fg("dim", preview), 0, 0);
 		},
 	});
 
@@ -2345,7 +2265,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("search", {
 		description: "Browse stored web search results",
 		handler: async (_args, ctx) => {
-			const results = getAllResults();
+			const results = storedResultStore.getAll();
 
 			if (results.length === 0) {
 				ctx.ui.notify("No stored search results", "info");
@@ -2378,7 +2298,7 @@ export default function (pi: ExtensionAPI) {
 			const action = await ctx.ui.select(`Result ${selected.id.slice(0, 6)}`, actions);
 
 			if (action === "Delete") {
-				deleteResult(selected.id);
+				storedResultStore.delete(selected.id);
 				ctx.ui.notify(`Deleted ${selected.id.slice(0, 6)}`, "info");
 			} else if (action === "View details") {
 				let info = `ID: ${selected.id}\nType: ${selected.type}\nAge: ${Math.floor((Date.now() - selected.timestamp) / 60000)}m\n\n`;
