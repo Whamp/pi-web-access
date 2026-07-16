@@ -1,10 +1,8 @@
 import { activityMonitor } from "./activity.ts";
 import type { SearchOptions, SearchProviderAdapter, SearchResult, SearchResponse } from "./search-provider.ts";
-import type { WebAccessSettings } from "./configuration.ts";
-import { getWebSearchConfigPath } from "./utils.ts";
+import { getWebAccessConfiguration, type WebAccessSettings } from "./configuration.ts";
 
 const BRAVE_API_URL = "https://api.search.brave.com/res/v1/web/search";
-const CONFIG_PATH = getWebSearchConfigPath();
 const SEARCH_TIMEOUT_MS = 30_000;
 
 interface NormalizedDomainFilters {
@@ -107,7 +105,7 @@ export async function searchWithBrave(
 	if (!apiKey) {
 		throw new Error(
 			"Brave Search API key not found. Either:\n" +
-			`  1. Create ${CONFIG_PATH} with { "braveApiKey": "your-key" }\n` +
+			`  1. Create ${getWebAccessConfiguration().sourcePath} with { "braveApiKey": "your-key" }\n` +
 			"  2. Set BRAVE_API_KEY environment variable\n" +
 			"Get a key at https://brave.com/search/api/",
 		);

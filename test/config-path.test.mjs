@@ -5,7 +5,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-const utilsUrl = new URL("../utils.ts", import.meta.url).href;
 const perplexityUrl = new URL("../perplexity.ts", import.meta.url).href;
 const configurationUrl = new URL("../configuration.ts", import.meta.url).href;
 const geminiApiUrl = new URL("../gemini-api.ts", import.meta.url).href;
@@ -42,13 +41,12 @@ test("web-search config path uses PI_CODING_AGENT_DIR before XDG_CONFIG_HOME", a
 	await writeFile(join(xdgDir, "pi", "web-search.json"), JSON.stringify({}) + "\n", "utf8");
 
 	const child = runChild(`
-		const { getWebSearchConfigDir, getWebSearchConfigPath } = await import(${JSON.stringify(utilsUrl)});
 		const { createWebAccessConfiguration } = await import(${JSON.stringify(configurationUrl)});
+		const configuration = createWebAccessConfiguration();
 		const { isPerplexityAvailable } = await import(${JSON.stringify(perplexityUrl)});
 		console.log(JSON.stringify({
-			dir: getWebSearchConfigDir(),
-			path: getWebSearchConfigPath(),
-			available: isPerplexityAvailable(createWebAccessConfiguration().current()),
+			path: configuration.sourcePath,
+			available: isPerplexityAvailable(configuration.current()),
 		}));
 	`, {
 		PI_CODING_AGENT_DIR: agentDir,
@@ -59,7 +57,6 @@ test("web-search config path uses PI_CODING_AGENT_DIR before XDG_CONFIG_HOME", a
 
 	assert.equal(child.status, 0, child.stderr);
 	assert.deepEqual(JSON.parse(child.stdout), {
-		dir: agentDir,
 		path: join(agentDir, "web-search.json"),
 		available: true,
 	});
@@ -72,11 +69,10 @@ test("web-search config path uses XDG_CONFIG_HOME pi directory when agent dir is
 	await writeFile(join(xdgDir, "pi", "web-search.json"), JSON.stringify({ geminiApiKey: "gemini-from-xdg" }) + "\n", "utf8");
 
 	const child = runChild(`
-		const { getWebSearchConfigDir, getWebSearchConfigPath } = await import(${JSON.stringify(utilsUrl)});
+		const { getWebAccessConfiguration } = await import(${JSON.stringify(configurationUrl)});
 		const { isGeminiApiAvailable } = await import(${JSON.stringify(geminiApiUrl)});
 		console.log(JSON.stringify({
-			dir: getWebSearchConfigDir(),
-			path: getWebSearchConfigPath(),
+			path: getWebAccessConfiguration().sourcePath,
 			available: isGeminiApiAvailable(),
 		}));
 	`, {
@@ -88,7 +84,6 @@ test("web-search config path uses XDG_CONFIG_HOME pi directory when agent dir is
 
 	assert.equal(child.status, 0, child.stderr);
 	assert.deepEqual(JSON.parse(child.stdout), {
-		dir: join(xdgDir, "pi"),
 		path: join(xdgDir, "pi", "web-search.json"),
 		available: true,
 	});

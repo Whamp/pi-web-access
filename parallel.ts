@@ -3,12 +3,10 @@ import { settleWithAbort } from "./abort.ts";
 import type { ExtractedContent, ExtractOptions } from "./extract.ts";
 import { abandonResponseBody, readResponseBytes } from "./response-body.ts";
 import type { SearchOptions, SearchProviderAdapter, SearchResponse } from "./search-provider.ts";
-import type { WebAccessSettings } from "./configuration.ts";
-import { getWebSearchConfigPath } from "./utils.ts";
+import { getWebAccessConfiguration, type WebAccessSettings } from "./configuration.ts";
 
 const PARALLEL_SEARCH_URL = "https://api.parallel.ai/v1/search";
 const PARALLEL_EXTRACT_URL = "https://api.parallel.ai/v1/extract";
-const CONFIG_PATH = getWebSearchConfigPath();
 const MIN_PARALLEL_API_KEY_LENGTH = 8;
 const MIN_USEFUL_CONTENT = 500;
 const SEARCH_TIMEOUT_MS = 60_000;
@@ -73,7 +71,7 @@ function getApiKey(settings: Pick<WebAccessSettings, "parallelApiKey">): string 
 	if (!key) {
 		throw new Error(
 			"Parallel API key not found. Either:\n" +
-			`  1. Create ${CONFIG_PATH} with { "parallelApiKey": "your-key" }\n` +
+			`  1. Create ${getWebAccessConfiguration().sourcePath} with { "parallelApiKey": "your-key" }\n` +
 			"  2. Set PARALLEL_API_KEY environment variable\n" +
 			"Get a key at https://platform.parallel.ai",
 		);

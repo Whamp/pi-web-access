@@ -1,9 +1,9 @@
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir, open, rename, stat, unlink } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
+import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { validateSsrfAllowRanges } from "./ssrf-protection.ts";
-import { getWebSearchConfigPath } from "./utils.ts";
 
 export type SearchProviderSetting = "auto" | "openai" | "brave" | "parallel" | "tavily" | "exa" | "perplexity" | "gemini";
 export type WorkflowSetting = "none" | "auto-summary" | "summary-review";
@@ -239,8 +239,14 @@ export function getWebAccessConfiguration(): WebAccessConfiguration {
 	return productionConfiguration;
 }
 
+function resolveSourcePath(): string {
+	const directory = process.env.PI_CODING_AGENT_DIR
+		?? (process.env.XDG_CONFIG_HOME ? join(process.env.XDG_CONFIG_HOME, "pi") : join(homedir(), ".pi"));
+	return join(directory, "web-search.json");
+}
+
 export function createWebAccessConfiguration(options: WebAccessConfigurationOptions = {}): WebAccessConfiguration {
-	const sourcePath = options.sourcePath ?? getWebSearchConfigPath();
+	const sourcePath = options.sourcePath ?? resolveSourcePath();
 	let raw: JsonObject = {};
 	if (existsSync(sourcePath)) {
 		let parsed: unknown;

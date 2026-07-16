@@ -243,7 +243,13 @@ Press **Ctrl+Shift+W** to toggle the request activity monitor. Shortcuts are con
 
 ## Configuration
 
-Configuration lives at `~/.pi/web-search.json`, or under `PI_CODING_AGENT_DIR` / `XDG_CONFIG_HOME/pi` when set. Every field is optional.
+Web Access resolves `web-search.json` in this order:
+
+1. `PI_CODING_AGENT_DIR/web-search.json`
+2. `XDG_CONFIG_HOME/pi/web-search.json`
+3. `~/.pi/web-search.json`
+
+Every field is optional. If the file is missing, Web Access uses the defaults shown below. Web Access loads the file once when the extension starts. Malformed JSON or an invalid known field stops extension startup and names the file and field. Unknown fields produce one key-only warning, remain preserved when Web Access saves a supported setting, and do not block startup.
 
 ```json
 {
@@ -288,7 +294,11 @@ Configuration lives at `~/.pi/web-search.json`, or under `PI_CODING_AGENT_DIR` /
 }
 ```
 
+The same file also supports `geminiBaseUrl`, `cloudflareApiKey`, and `chromeProfile`. The legacy `searchProvider` field remains accepted for compatibility; `provider` is the current default-provider field. Omitted credentials and `summaryModel` remain unset.
+
 Set `webSearch.enabled` to `false` to unregister the `web_search` tool while keeping content-fetching tools available.
+
+Changes saved inside Web Access, such as a Search Curator provider change, take effect for work started after the save completes. A failed save leaves the previous file and runtime settings active. Manual file edits are not watched; restart Pi to load them.
 
 Environment variables override matching configuration fields:
 

@@ -1,12 +1,10 @@
 import { activityMonitor } from "./activity.ts";
 import type { SearchOptions, SearchProviderAdapter, SearchResponse, SearchResult } from "./search-provider.ts";
-import type { WebAccessSettings } from "./configuration.ts";
-import { getWebSearchConfigPath } from "./utils.ts";
+import { getWebAccessConfiguration, type WebAccessSettings } from "./configuration.ts";
 
 export type { SearchOptions, SearchResponse, SearchResult } from "./search-provider.ts";
 
 const PERPLEXITY_API_URL = "https://api.perplexity.ai/chat/completions";
-const CONFIG_PATH = getWebSearchConfigPath();
 
 const RATE_LIMIT = {
 	maxRequests: 10,
@@ -26,7 +24,7 @@ function getApiKey(settings: Pick<WebAccessSettings, "perplexityApiKey">): strin
 	if (!key) {
 		throw new Error(
 			"Perplexity API key not found. Either:\n" +
-			`  1. Create ${CONFIG_PATH} with { "perplexityApiKey": "your-key" }\n` +
+			`  1. Create ${getWebAccessConfiguration().sourcePath} with { "perplexityApiKey": "your-key" }\n` +
 			"  2. Set PERPLEXITY_API_KEY environment variable\n" +
 			"Get a key at https://perplexity.ai/settings/api"
 		);

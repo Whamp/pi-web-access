@@ -2,7 +2,7 @@ import { Readability } from "@mozilla/readability";
 import { parseHTML } from "linkedom";
 import TurndownService from "turndown";
 import { activityMonitor } from "./activity.ts";
-import { DEFAULT_MEDIA_SETTINGS, type MediaSettings } from "./configuration.ts";
+import { DEFAULT_MEDIA_SETTINGS, DEFAULT_WEB_ACCESS_SETTINGS, getWebAccessConfiguration, type MediaSettings, type WebAccessSettings } from "./configuration.ts";
 import { settleWithAbort } from "./abort.ts";
 import { createAbortableLimiter } from "./abortable-limit.ts";
 import { extractRSCContent } from "./rsc-extract.ts";
@@ -13,8 +13,7 @@ import { extractWithUrlContext, extractWithGeminiWeb } from "./gemini-url-contex
 import { extractWithParallel, isParallelAvailable } from "./parallel.ts";
 import { isVideoFile, extractVideo, extractVideoFrame, getLocalVideoDuration } from "./video-extract.ts";
 import { fetchRemoteUrl, validateRemoteUrl, type Lookup } from "./ssrf-protection.ts";
-import { formatSeconds, getWebSearchConfigPath } from "./utils.ts";
-import { DEFAULT_WEB_ACCESS_SETTINGS, type WebAccessSettings } from "./configuration.ts";
+import { formatSeconds } from "./utils.ts";
 import { discardResponseBody, fetchOwnedResponse, readResponseBytes, readResponseText } from "./response-body.ts";
 
 const DEFAULT_TIMEOUT_MS = 30000;
@@ -22,16 +21,11 @@ const CONCURRENT_LIMIT = 3;
 
 const NON_RECOVERABLE_ERRORS = ["Unsupported content type", "Response too large"];
 const MIN_USEFUL_CONTENT = 500;
-const WEB_SEARCH_CONFIG_PATH = getWebSearchConfigPath();
 
 type ContentRetrievalSettings = Pick<WebAccessSettings, "ssrf" | "githubClone" | "parallelApiKey">;
 
 function errorMessage(err: unknown): string {
 	return err instanceof Error ? err.message : String(err);
-}
-
-function isConfigParseError(err: unknown): boolean {
-	return errorMessage(err).startsWith("Failed to parse ");
 }
 
 function isAbortError(err: unknown): boolean {
@@ -376,7 +370,7 @@ export async function extractContent(
 		try {
 			const result = await extractVideo(localVideo.info, signal, options, media.video);
 			if (signal?.aborted) return abortedResult(url);
-			return result ?? { url, title: "", content: "", error: `Video analysis requires Gemini access. Either:\n  1. Sign into gemini.google.com in Chrome (free, uses cookies)\n  2. Set GEMINI_API_KEY in ${WEB_SEARCH_CONFIG_PATH}` };
+			return result ?? { url, title: "", content: "", error: `Video analysis requires Gemini access. Either:\n  1. Sign into gemini.google.com in Chrome (free, uses cookies)\n  2. Set GEMINI_API_KEY in ${getWebAccessConfiguration().sourcePath}` };
 		} catch (err) {
 			if (isAbortError(err)) return abortedResult(url);
 			return { url, title: "", content: "", error: errorMessage(err) };
@@ -397,11 +391,7 @@ export async function extractContent(
 		if (ghResult) return ghResult;
 		if (signal?.aborted) return abortedResult(url);
 	} catch (err) {
-		const message = errorMessage(err);
 		if (isAbortError(err)) return abortedResult(url);
-		if (isConfigParseError(err)) {
-			return { url, title: "", content: "", error: message };
-		}
 	}
 
 	const ytInfo = isYouTubeURL(url);
@@ -451,9 +441,6 @@ export async function extractContent(
 	} catch (err) {
 		if (isAbortError(err)) return abortedResult(url);
 		parallelError = errorMessage(err);
-		if (isConfigParseError(err)) {
-			return { ...httpResult, error: parallelError };
-		}
 	}
 	if (signal?.aborted) return abortedResult(url);
 
@@ -463,9 +450,6 @@ export async function extractContent(
 			?? await extractWithGeminiWeb(url, signal);
 	} catch (err) {
 		if (isAbortError(err)) return abortedResult(url);
-		if (isConfigParseError(err)) {
-			return { ...httpResult, error: errorMessage(err) };
-		}
 	}
 
 	if (geminiResult) return geminiResult;
@@ -476,8 +460,8 @@ export async function extractContent(
 		...(parallelError ? [`Parallel fallback failed: ${parallelError}`] : []),
 		"",
 		"Fallback options:",
-		`  \u2022 Set PARALLEL_API_KEY in ${WEB_SEARCH_CONFIG_PATH}`,
-		`  \u2022 Set GEMINI_API_KEY in ${WEB_SEARCH_CONFIG_PATH}`,
+		`  \u2022 Set PARALLEL_API_KEY in ${getWebAccessConfiguration().sourcePath}`,
+		`  \u2022 Set GEMINI_API_KEY in ${getWebAccessConfiguration().sourcePath}`,
 		"  \u2022 Sign into gemini.google.com in Chrome",
 		"  \u2022 Use web_search to find content about this topic",
 	].join("\n");

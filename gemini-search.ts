@@ -91,11 +91,8 @@ export const geminiSearchProvider: SearchProviderAdapter<"gemini"> = {
 /** @deprecated Use the extension-registered Web search tool. */
 export async function search(query: string, options: FullSearchOptions = {}): Promise<AttributedSearchResponse> {
 	const config = getSearchConfig();
-	const [{ createWebAccessConfiguration }, { createConfiguredWebSearch }] = await Promise.all([
-		import("./configuration.ts"),
-		import("./web-search.ts"),
-	]);
-	const webSearch = createConfiguredWebSearch(createWebAccessConfiguration().current());
+	const { createConfiguredWebSearch } = await import("./web-search.ts");
+	const webSearch = createConfiguredWebSearch(getWebAccessConfiguration().current());
 	return webSearch.search(query, {
 		...options,
 		provider: options.provider ?? config.searchProvider,

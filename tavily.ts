@@ -1,11 +1,9 @@
 import { activityMonitor } from "./activity.ts";
 import type { ExtractedContent } from "./extract.ts";
 import type { SearchOptions, SearchProviderAdapter, SearchResponse } from "./search-provider.ts";
-import type { WebAccessSettings } from "./configuration.ts";
-import { getWebSearchConfigPath } from "./utils.ts";
+import { getWebAccessConfiguration, type WebAccessSettings } from "./configuration.ts";
 
 const TAVILY_API_URL = "https://api.tavily.com/search";
-const CONFIG_PATH = getWebSearchConfigPath();
 const SEARCH_TIMEOUT_MS = 60_000;
 
 interface TavilyResult {
@@ -39,7 +37,7 @@ function requireApiKey(settings: Pick<WebAccessSettings, "tavilyApiKey">): strin
 	if (!apiKey) {
 		throw new Error(
 			"Tavily API key not found. Either:\n" +
-			`  1. Create ${CONFIG_PATH} with { "tavilyApiKey": "your-key" }\n` +
+			`  1. Create ${getWebAccessConfiguration().sourcePath} with { "tavilyApiKey": "your-key" }\n` +
 			"  2. Set TAVILY_API_KEY environment variable\n" +
 			"Get a key at https://app.tavily.com/",
 		);
