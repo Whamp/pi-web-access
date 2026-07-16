@@ -1,6 +1,6 @@
-import { existsSync, readFileSync } from "node:fs";
 import { activityMonitor } from "./activity.ts";
 import type { SearchOptions, SearchProviderAdapter, SearchResponse, SearchResult } from "./search-provider.ts";
+import type { WebAccessSettings } from "./configuration.ts";
 import { getWebSearchConfigPath } from "./utils.ts";
 
 export type { SearchOptions, SearchResponse, SearchResult } from "./search-provider.ts";
@@ -15,38 +15,14 @@ const RATE_LIMIT = {
 
 const requestTimestamps: number[] = [];
 
-interface WebSearchConfig {
-	perplexityApiKey?: unknown;
-}
-
-let cachedConfig: WebSearchConfig | null = null;
-
-function loadConfig(): WebSearchConfig {
-	if (cachedConfig) return cachedConfig;
-	if (!existsSync(CONFIG_PATH)) {
-		cachedConfig = {};
-		return cachedConfig;
-	}
-
-	const content = readFileSync(CONFIG_PATH, "utf-8");
-	try {
-		cachedConfig = JSON.parse(content) as WebSearchConfig;
-		return cachedConfig;
-	} catch (err) {
-		const message = err instanceof Error ? err.message : String(err);
-		throw new Error(`Failed to parse ${CONFIG_PATH}: ${message}`);
-	}
-}
-
 function normalizeApiKey(value: unknown): string | null {
 	if (typeof value !== "string") return null;
 	const normalized = value.trim();
 	return normalized.length > 0 ? normalized : null;
 }
 
-function getApiKey(): string {
-	const config = loadConfig();
-	const key = normalizeApiKey(process.env.PERPLEXITY_API_KEY) ?? normalizeApiKey(config.perplexityApiKey);
+function getApiKey(settings: Pick<WebAccessSettings, "perplexityApiKey">): string {
+	const key = normalizeApiKey(process.env.PERPLEXITY_API_KEY) ?? normalizeApiKey(settings.perplexityApiKey);
 	if (!key) {
 		throw new Error(
 			"Perplexity API key not found. Either:\n" +
@@ -81,12 +57,11 @@ function validateDomainFilter(domains: string[]): string[] {
 	});
 }
 
-export function isPerplexityAvailable(): boolean {
-	const config = loadConfig();
-	return !!(normalizeApiKey(process.env.PERPLEXITY_API_KEY) ?? normalizeApiKey(config.perplexityApiKey));
+export function isPerplexityAvailable(settings: Pick<WebAccessSettings, "perplexityApiKey"> = {}): boolean {
+	return !!(normalizeApiKey(process.env.PERPLEXITY_API_KEY) ?? normalizeApiKey(settings.perplexityApiKey));
 }
 
-export async function searchWithPerplexity(query: string, options: SearchOptions = {}): Promise<SearchResponse> {
+export async function searchWithPerplexity(query: string, options: SearchOptions = {}, settings: Pick<WebAccessSettings, "perplexityApiKey"> = {}): Promise<SearchResponse> {
 	checkRateLimit();
 
 	const activityId = activityMonitor.logStart({ type: "api", query });
@@ -98,7 +73,7 @@ export async function searchWithPerplexity(query: string, options: SearchOptions
 		windowMs: RATE_LIMIT.windowMs,
 	});
 
-	const apiKey = getApiKey();
+	const apiKey = getApiKey(settings);
 	const numResults = Math.min(options.numResults ?? 5, 20);
 
 	const requestBody: Record<string, unknown> = {
@@ -176,11 +151,12 @@ export async function searchWithPerplexity(query: string, options: SearchOptions
 	return { answer, results };
 }
 
-export const perplexitySearchProvider: SearchProviderAdapter<"perplexity"> = {
-	name: "perplexity",
-	label: "Perplexity",
-	eligibility: () => isPerplexityAvailable()
-		? { eligible: true }
-		: { eligible: false, reason: "Perplexity API key is not configured." },
-	search: ({ query, options }) => searchWithPerplexity(query, options),
-};
+export function createPerplexitySearchProvider(settings: Pick<WebAccessSettings, "perplexityApiKey">): SearchProviderAdapter<"perplexity"> {
+	return {
+		name: "perplexity", label: "Perplexity",
+		eligibility: () => isPerplexityAvailable(settings) ? { eligible: true } : { eligible: false, reason: "Perplexity API key is not configured." },
+		search: ({ query, options }) => searchWithPerplexity(query, options, settings),
+	};
+}
+
+export const perplexitySearchProvider = createPerplexitySearchProvider({});

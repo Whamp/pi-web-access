@@ -5,8 +5,8 @@ import { StringEnum, complete, type Model } from "@earendil-works/pi-ai/compat";
 import { fetchAllContent, type ExtractedContent } from "./extract.ts";
 import { normalizeFetchContentParams } from "./fetch-params.ts";
 import { clearCloneCache } from "./github-extract.ts";
-import type { ResolvedSearchProvider, SearchProvider, SearchResult } from "./search-provider.ts";
-import { webSearch } from "./web-search.ts";
+import type { ResolvedSearchProvider, SearchProvider, SearchResult, WebSearch } from "./search-provider.ts";
+import { createConfiguredWebSearch } from "./web-search.ts";
 import { formatSeconds, getWebSearchConfigPath } from "./utils.ts";
 import { createWebAccessConfiguration, type WebAccessSettings } from "./configuration.ts";
 import {
@@ -112,7 +112,7 @@ function getCuratorTimeoutSeconds(settings: Readonly<WebAccessSettings>): number
 	return settings.curatorTimeoutSeconds;
 }
 
-async function getProviderAvailability(ctx: ExtensionContext): Promise<ProviderAvailability> {
+async function getProviderAvailability(ctx: ExtensionContext, webSearch: WebSearch): Promise<ProviderAvailability> {
 	const eligibility = await webSearch.eligibility({ extensionContext: ctx });
 	return {
 		openai: eligibility.openai.eligible,
@@ -138,9 +138,10 @@ async function loadCuratorBootstrap(
 	requestedProvider: unknown,
 	ctx: ExtensionContext,
 	settings: Readonly<WebAccessSettings>,
-	options?: Pick<PendingCurate, "numResults" | "recencyFilter">,
+	options: Pick<PendingCurate, "numResults" | "recencyFilter"> | undefined,
+	webSearch: WebSearch,
 ): Promise<CuratorBootstrap> {
-	const availableProviders = await getProviderAvailability(ctx);
+	const availableProviders = await getProviderAvailability(ctx, webSearch);
 	return {
 		availableProviders,
 		defaultProvider: resolveProvider(requestedProvider, availableProviders, settings, options),
@@ -421,6 +422,7 @@ function formatEntryLine(
 export default function (pi: ExtensionAPI) {
 	const configuration = createWebAccessConfiguration();
 	const initConfig = configuration.current();
+	const webSearch = createConfiguredWebSearch(initConfig);
 	const storedResultStore = createStoredResultStore();
 	const curateKey = initConfig.shortcuts.curate;
 	const activityKey = initConfig.shortcuts.activity;
@@ -518,7 +520,7 @@ export default function (pi: ExtensionAPI) {
 			await Promise.all(missing.map(async ([key, url]) => {
 				let item: ExtractedContent | undefined;
 				try {
-					[item] = await fetchAllContent([url], contentSignal);
+					[item] = await fetchAllContent([url], contentSignal, undefined, initConfig);
 				} catch (error) {
 					if (executionSignal.aborted) throw executionSignal.reason;
 					if (!deadlineSignal.aborted) throw error;
@@ -1593,7 +1595,7 @@ export default function (pi: ExtensionAPI) {
 				details: { phase: "fetch", progress: 0 },
 			});
 
-			const fetchResults = await fetchAllContent(urlList, signal, options);
+			const fetchResults = await fetchAllContent(urlList, signal, options, initConfig);
 			const successful = fetchResults.filter((r) => !r.error).length;
 			const totalChars = fetchResults.reduce((sum, r) => sum + r.content.length, 0);
 
@@ -1920,7 +1922,7 @@ export default function (pi: ExtensionAPI) {
 
 			let bootstrap: CuratorBootstrap;
 			try {
-				bootstrap = await loadCuratorBootstrap(undefined, ctx, workSettings);
+				bootstrap = await loadCuratorBootstrap(undefined, ctx, workSettings, undefined, webSearch);
 			} catch (err) {
 				const message = err instanceof Error ? err.message : String(err);
 				ctx.ui.notify(`Failed to load web search config: ${message}`, "error");

@@ -1,10 +1,10 @@
 import { settleWithAbort } from "./abort.ts";
-import { braveSearchProvider } from "./brave.ts";
-import { exaSearchProvider } from "./exa.ts";
+import { createBraveSearchProvider } from "./brave.ts";
+import { createExaSearchProvider } from "./exa.ts";
 import { geminiSearchProvider } from "./gemini-search.ts";
-import { openAISearchProvider } from "./openai-search.ts";
-import { parallelSearchProvider } from "./parallel.ts";
-import { perplexitySearchProvider } from "./perplexity.ts";
+import { createOpenAISearchProvider } from "./openai-search.ts";
+import { createParallelSearchProvider } from "./parallel.ts";
+import { createPerplexitySearchProvider } from "./perplexity.ts";
 import type {
 	FullSearchOptions,
 	ProviderEligibility,
@@ -13,7 +13,8 @@ import type {
 	SearchProviders,
 	WebSearch,
 } from "./search-provider.ts";
-import { tavilySearchProvider } from "./tavily.ts";
+import { createTavilySearchProvider } from "./tavily.ts";
+import type { WebAccessSettings } from "./configuration.ts";
 import { getWebSearchConfigPath } from "./utils.ts";
 
 const AUTO_PROVIDER_ORDER = ["openai", "exa", "brave", "parallel", "tavily", "perplexity", "gemini"] as const;
@@ -164,12 +165,14 @@ export function createWebSearch(providers: SearchProviders): WebSearch {
 	};
 }
 
-export const webSearch = createWebSearch({
-	openai: openAISearchProvider,
-	exa: exaSearchProvider,
-	brave: braveSearchProvider,
-	parallel: parallelSearchProvider,
-	tavily: tavilySearchProvider,
-	perplexity: perplexitySearchProvider,
-	gemini: geminiSearchProvider,
-});
+export function createConfiguredWebSearch(settings: Readonly<WebAccessSettings>): WebSearch {
+	return createWebSearch({
+		openai: createOpenAISearchProvider(settings),
+		exa: createExaSearchProvider(settings),
+		brave: createBraveSearchProvider(settings),
+		parallel: createParallelSearchProvider(settings),
+		tavily: createTavilySearchProvider(settings),
+		perplexity: createPerplexitySearchProvider(settings),
+		gemini: geminiSearchProvider,
+	});
+}

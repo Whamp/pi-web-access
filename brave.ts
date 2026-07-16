@@ -1,38 +1,15 @@
-import { existsSync, readFileSync } from "node:fs";
 import { activityMonitor } from "./activity.ts";
 import type { SearchOptions, SearchProviderAdapter, SearchResult, SearchResponse } from "./search-provider.ts";
+import type { WebAccessSettings } from "./configuration.ts";
 import { getWebSearchConfigPath } from "./utils.ts";
 
 const BRAVE_API_URL = "https://api.search.brave.com/res/v1/web/search";
 const CONFIG_PATH = getWebSearchConfigPath();
 const SEARCH_TIMEOUT_MS = 30_000;
 
-interface WebSearchConfig {
-	braveApiKey?: unknown;
-}
-
 interface NormalizedDomainFilters {
 	allowed: string[];
 	blocked: string[];
-}
-
-let cachedConfig: WebSearchConfig | null = null;
-
-function loadConfig(): WebSearchConfig {
-	if (cachedConfig) return cachedConfig;
-	if (!existsSync(CONFIG_PATH)) {
-		cachedConfig = {};
-		return cachedConfig;
-	}
-
-	const raw = readFileSync(CONFIG_PATH, "utf-8");
-	try {
-		cachedConfig = JSON.parse(raw) as WebSearchConfig;
-		return cachedConfig;
-	} catch (err) {
-		const message = err instanceof Error ? err.message : String(err);
-		throw new Error(`Failed to parse ${CONFIG_PATH}: ${message}`);
-	}
 }
 
 function normalizeApiKey(value: unknown): string | null {
@@ -41,8 +18,8 @@ function normalizeApiKey(value: unknown): string | null {
 	return normalized.length > 0 ? normalized : null;
 }
 
-function getApiKey(): string | null {
-	return normalizeApiKey(process.env.BRAVE_API_KEY) ?? normalizeApiKey(loadConfig().braveApiKey);
+function getApiKey(settings: Pick<WebAccessSettings, "braveApiKey">): string | null {
+	return normalizeApiKey(process.env.BRAVE_API_KEY) ?? normalizeApiKey(settings.braveApiKey);
 }
 
 function normalizeCount(value: number | undefined): number {
@@ -117,15 +94,16 @@ function matchesDomainFilters(url: string, filters: NormalizedDomainFilters): bo
 	return !filters.blocked.some(domain => hostMatchesDomain(hostname, domain));
 }
 
-export function isBraveAvailable(): boolean {
-	return !!getApiKey();
+export function isBraveAvailable(settings: Pick<WebAccessSettings, "braveApiKey"> = {}): boolean {
+	return !!getApiKey(settings);
 }
 
 export async function searchWithBrave(
 	query: string,
 	options: SearchOptions = {},
+	settings: Pick<WebAccessSettings, "braveApiKey"> = {},
 ): Promise<SearchResponse> {
-	const apiKey = getApiKey();
+	const apiKey = getApiKey(settings);
 	if (!apiKey) {
 		throw new Error(
 			"Brave Search API key not found. Either:\n" +
@@ -209,11 +187,15 @@ export async function searchWithBrave(
 	}
 }
 
-export const braveSearchProvider: SearchProviderAdapter<"brave"> = {
-	name: "brave",
-	label: "Brave",
-	eligibility: () => isBraveAvailable()
-		? { eligible: true }
-		: { eligible: false, reason: "Brave API key is not configured." },
-	search: ({ query, options }) => searchWithBrave(query, options),
-};
+export function createBraveSearchProvider(settings: Pick<WebAccessSettings, "braveApiKey">): SearchProviderAdapter<"brave"> {
+	return {
+		name: "brave",
+		label: "Brave",
+		eligibility: () => isBraveAvailable(settings)
+			? { eligible: true }
+			: { eligible: false, reason: "Brave API key is not configured." },
+		search: ({ query, options }) => searchWithBrave(query, options, settings),
+	};
+}
+
+export const braveSearchProvider = createBraveSearchProvider({});

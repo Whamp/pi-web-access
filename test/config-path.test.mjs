@@ -7,6 +7,7 @@ import { test } from "node:test";
 
 const utilsUrl = new URL("../utils.ts", import.meta.url).href;
 const perplexityUrl = new URL("../perplexity.ts", import.meta.url).href;
+const configurationUrl = new URL("../configuration.ts", import.meta.url).href;
 const geminiApiUrl = new URL("../gemini-api.ts", import.meta.url).href;
 
 function runChild(script, env) {
@@ -40,11 +41,12 @@ test("web-search config path uses PI_CODING_AGENT_DIR before XDG_CONFIG_HOME", a
 
 	const child = runChild(`
 		const { getWebSearchConfigDir, getWebSearchConfigPath } = await import(${JSON.stringify(utilsUrl)});
+		const { createWebAccessConfiguration } = await import(${JSON.stringify(configurationUrl)});
 		const { isPerplexityAvailable } = await import(${JSON.stringify(perplexityUrl)});
 		console.log(JSON.stringify({
 			dir: getWebSearchConfigDir(),
 			path: getWebSearchConfigPath(),
-			available: isPerplexityAvailable(),
+			available: isPerplexityAvailable(createWebAccessConfiguration().current()),
 		}));
 	`, {
 		PI_CODING_AGENT_DIR: agentDir,

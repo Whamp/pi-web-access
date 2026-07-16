@@ -1,9 +1,9 @@
-import { existsSync, readFileSync } from "node:fs";
 import { activityMonitor } from "./activity.ts";
 import { settleWithAbort } from "./abort.ts";
 import type { ExtractedContent, ExtractOptions } from "./extract.ts";
 import { abandonResponseBody, readResponseBytes } from "./response-body.ts";
 import type { SearchOptions, SearchProviderAdapter, SearchResponse } from "./search-provider.ts";
+import type { WebAccessSettings } from "./configuration.ts";
 import { getWebSearchConfigPath } from "./utils.ts";
 
 const PARALLEL_SEARCH_URL = "https://api.parallel.ai/v1/search";
@@ -28,10 +28,6 @@ const PLACEHOLDER_API_KEY_DENYLIST = new Set([
 	"xxx",
 ]);
 
-interface WebSearchConfig {
-	parallelApiKey?: unknown;
-}
-
 interface V1WebSearchResult {
 	url: string;
 	title?: string | null;
@@ -51,29 +47,6 @@ interface ParallelSearchOptions extends SearchOptions {
 	includeContent?: boolean;
 }
 
-let cachedConfig: WebSearchConfig | null = null;
-
-function loadConfig(): WebSearchConfig {
-	if (cachedConfig) return cachedConfig;
-	if (!existsSync(CONFIG_PATH)) {
-		cachedConfig = {};
-		return cachedConfig;
-	}
-
-	const raw = readFileSync(CONFIG_PATH, "utf-8");
-	try {
-		cachedConfig = JSON.parse(raw) as WebSearchConfig;
-		return cachedConfig;
-	} catch (err) {
-		const message = err instanceof Error ? err.message : String(err);
-		throw new Error(`Failed to parse ${CONFIG_PATH}: ${message}`);
-	}
-}
-
-export function clearParallelConfigCache(): void {
-	cachedConfig = null;
-}
-
 function normalizeApiKey(value: unknown): string | null {
 	if (typeof value !== "string") return null;
 	const normalized = value.trim();
@@ -85,18 +58,18 @@ function isPlaceholderApiKey(key: string): boolean {
 	return normalized.length < MIN_PARALLEL_API_KEY_LENGTH || PLACEHOLDER_API_KEY_DENYLIST.has(normalized.toLowerCase());
 }
 
-function resolveApiKey(): string | null {
+function resolveApiKey(settings: Pick<WebAccessSettings, "parallelApiKey">): string | null {
 	const envKey = normalizeApiKey(process.env.PARALLEL_API_KEY);
 	if (envKey && !isPlaceholderApiKey(envKey)) return envKey;
 
-	const configKey = normalizeApiKey(loadConfig().parallelApiKey);
+	const configKey = normalizeApiKey(settings.parallelApiKey);
 	if (configKey && !isPlaceholderApiKey(configKey)) return configKey;
 
 	return null;
 }
 
-function getApiKey(): string {
-	const key = resolveApiKey();
+function getApiKey(settings: Pick<WebAccessSettings, "parallelApiKey">): string {
+	const key = resolveApiKey(settings);
 	if (!key) {
 		throw new Error(
 			"Parallel API key not found. Either:\n" +
@@ -108,12 +81,12 @@ function getApiKey(): string {
 	return key;
 }
 
-export function hasParallelApiKey(): boolean {
-	return !!resolveApiKey();
+export function hasParallelApiKey(settings: Pick<WebAccessSettings, "parallelApiKey"> = {}): boolean {
+	return !!resolveApiKey(settings);
 }
 
-export function isParallelAvailable(): boolean {
-	return hasParallelApiKey();
+export function isParallelAvailable(settings: Pick<WebAccessSettings, "parallelApiKey"> = {}): boolean {
+	return hasParallelApiKey(settings);
 }
 
 function requestSignal(signal?: AbortSignal): AbortSignal {
@@ -285,16 +258,17 @@ function hasExtractUrlError(errors: unknown, url: string): boolean {
 async function fetchAndMapExtractResult(
 	url: string,
 	body: Record<string, unknown>,
-	signal?: AbortSignal,
+	signal: AbortSignal | undefined,
+	settings: Pick<WebAccessSettings, "parallelApiKey">,
 ): Promise<{ mapped: ExtractedContent | null; result: V1ExtractResult | undefined }> {
-	const data = await parallelFetch(PARALLEL_EXTRACT_URL, body, signal);
+	const data = await parallelFetch(PARALLEL_EXTRACT_URL, body, signal, settings);
 	if (hasExtractUrlError(data.errors, url)) return { mapped: null, result: undefined };
 	const result = findExtractResult(data.results as V1ExtractResult[] | undefined, url);
 	return { mapped: mapExtractResult(result), result };
 }
 
-export async function searchWithParallel(query: string, options: ParallelSearchOptions = {}): Promise<SearchResponse> {
-	const data = await parallelFetch(PARALLEL_SEARCH_URL, buildSearchRequestBody(query, options), options.signal);
+export async function searchWithParallel(query: string, options: ParallelSearchOptions = {}, settings: Pick<WebAccessSettings, "parallelApiKey"> = {}): Promise<SearchResponse> {
+	const data = await parallelFetch(PARALLEL_SEARCH_URL, buildSearchRequestBody(query, options), options.signal, settings);
 	const results = data.results as V1WebSearchResult[] | undefined;
 	const response: SearchResponse = {
 		answer: buildAnswerFromExcerpts(results),
@@ -311,21 +285,23 @@ export async function extractWithParallel(
 	url: string,
 	signal?: AbortSignal,
 	options: ExtractOptions = {},
+	settings: Pick<WebAccessSettings, "parallelApiKey"> = {},
 ): Promise<ExtractedContent | null> {
-	const initial = await fetchAndMapExtractResult(url, buildExtractRequestBody(url, options), signal);
+	const initial = await fetchAndMapExtractResult(url, buildExtractRequestBody(url, options), signal, settings);
 	if (initial.mapped) return initial.mapped;
 	if (!initial.result || resolveExtractContent(initial.result).length >= MIN_USEFUL_CONTENT) return null;
 
-	const retry = await fetchAndMapExtractResult(url, buildExtractRequestBody(url, options, true), signal);
+	const retry = await fetchAndMapExtractResult(url, buildExtractRequestBody(url, options, true), signal, settings);
 	return retry.mapped;
 }
 
 async function parallelFetch(
 	url: string,
 	body: Record<string, unknown>,
-	signal?: AbortSignal,
+	signal: AbortSignal | undefined,
+	settings: Pick<WebAccessSettings, "parallelApiKey">,
 ): Promise<Record<string, unknown>> {
-	const apiKey = getApiKey();
+	const apiKey = getApiKey(settings);
 	const activityId = activityMonitor.logStart(activityContext(url, body));
 	const operationSignal = requestSignal(signal);
 	let response: Response;
@@ -368,11 +344,12 @@ async function parallelFetch(
 	}
 }
 
-export const parallelSearchProvider: SearchProviderAdapter<"parallel"> = {
-	name: "parallel",
-	label: "Parallel",
-	eligibility: () => isParallelAvailable()
-		? { eligible: true }
-		: { eligible: false, reason: "Parallel API key is not configured." },
-	search: ({ query, options }) => searchWithParallel(query, options),
-};
+export function createParallelSearchProvider(settings: Pick<WebAccessSettings, "parallelApiKey">): SearchProviderAdapter<"parallel"> {
+	return {
+		name: "parallel", label: "Parallel",
+		eligibility: () => isParallelAvailable(settings) ? { eligible: true } : { eligible: false, reason: "Parallel API key is not configured." },
+		search: ({ query, options }) => searchWithParallel(query, options, settings),
+	};
+}
+
+export const parallelSearchProvider = createParallelSearchProvider({});

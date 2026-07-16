@@ -40,26 +40,52 @@ function runChild(script, env = {}) {
 	});
 }
 
+test("Parallel search and extraction share the persistent credential snapshot", async () => {
+	const home = await createHome({ parallelApiKey: "pk_live_parallel_persistent_key" });
+	const child = runChild(`
+		const { createWebAccessConfiguration } = await import(new URL("../configuration.ts", ${JSON.stringify(import.meta.url)}));
+		const { createParallelSearchProvider, extractWithParallel } = await import(${JSON.stringify(parallelModuleUrl)});
+		const settings = createWebAccessConfiguration().current();
+		const keys = [];
+		globalThis.fetch = async (url, init) => {
+			keys.push({ url: String(url), key: init.headers["x-api-key"] });
+			if (String(url).endsWith("/search")) return new Response(JSON.stringify({ results: [] }), { status: 200 });
+			return new Response(JSON.stringify({ results: [{ url: "https://example.com", full_content: "x".repeat(600) }] }), { status: 200 });
+		};
+		const provider = createParallelSearchProvider(settings);
+		await provider.search({ query: "shared key", options: {} });
+		await extractWithParallel("https://example.com", undefined, {}, settings);
+		console.log(JSON.stringify({ keys, eligibility: await provider.eligibility({}) }));
+	`, { HOME: home, USERPROFILE: home });
+	assert.equal(child.status, 0, child.stderr);
+	const output = JSON.parse(child.stdout.trim());
+	assert.deepEqual(output.keys.map(call => call.key), ["pk_live_parallel_persistent_key", "pk_live_parallel_persistent_key"]);
+	assert.deepEqual(output.eligibility, { eligible: true });
+});
+
 test("Parallel availability reads env and config keys while rejecting placeholders", async () => {
 	const home = await createHome({ parallelApiKey: "your-key" });
 	let child = runChild(`
+		const { createWebAccessConfiguration } = await import(new URL("../configuration.ts", ${JSON.stringify(import.meta.url)}));
 		const { isParallelAvailable } = await import(${JSON.stringify(parallelModuleUrl)});
-		console.log(String(isParallelAvailable()));
+		console.log(String(isParallelAvailable(createWebAccessConfiguration().current())));
 	`, { HOME: home, USERPROFILE: home, PARALLEL_API_KEY: "" });
 	assert.equal(child.status, 0, child.stderr);
 	assert.equal(child.stdout.trim(), "false");
 
 	child = runChild(`
+		const { createWebAccessConfiguration } = await import(new URL("../configuration.ts", ${JSON.stringify(import.meta.url)}));
 		const { isParallelAvailable } = await import(${JSON.stringify(parallelModuleUrl)});
-		console.log(String(isParallelAvailable()));
+		console.log(String(isParallelAvailable(createWebAccessConfiguration().current())));
 	`, { HOME: home, USERPROFILE: home, PARALLEL_API_KEY: "pk_live_parallel_test_key" });
 	assert.equal(child.status, 0, child.stderr);
 	assert.equal(child.stdout.trim(), "true");
 
 	const configHome = await createHome({ parallelApiKey: "pk_live_parallel_config_key" });
 	child = runChild(`
+		const { createWebAccessConfiguration } = await import(new URL("../configuration.ts", ${JSON.stringify(import.meta.url)}));
 		const { isParallelAvailable } = await import(${JSON.stringify(parallelModuleUrl)});
-		console.log(String(isParallelAvailable()));
+		console.log(String(isParallelAvailable(createWebAccessConfiguration().current())));
 	`, { HOME: configHome, USERPROFILE: configHome, PARALLEL_API_KEY: "" });
 	assert.equal(child.status, 0, child.stderr);
 	assert.equal(child.stdout.trim(), "true");

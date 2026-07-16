@@ -13,6 +13,7 @@ import { extractWithParallel, isParallelAvailable } from "./parallel.ts";
 import { isVideoFile, extractVideo, extractVideoFrame, getLocalVideoDuration } from "./video-extract.ts";
 import { existsSync, readFileSync } from "node:fs";
 import { fetchRemoteUrl, validateRemoteUrl, type Lookup } from "./ssrf-protection.ts";
+import type { WebAccessSettings } from "./configuration.ts";
 import { formatSeconds, getWebSearchConfigPath } from "./utils.ts";
 import { discardResponseBody, fetchOwnedResponse, readResponseBytes, readResponseText } from "./response-body.ts";
 
@@ -253,6 +254,7 @@ export async function extractContent(
 	url: string,
 	signal?: AbortSignal,
 	options?: ExtractOptions,
+	settings: Pick<WebAccessSettings, "parallelApiKey"> = {},
 ): Promise<ExtractedContent> {
 	if (signal?.aborted) {
 		return { url, title: "", content: "", error: "Aborted" };
@@ -467,8 +469,8 @@ export async function extractContent(
 
 	let parallelError: string | null = null;
 	try {
-		if (isParallelAvailable()) {
-			const parallelResult = await extractWithParallel(url, signal, options);
+		if (isParallelAvailable(settings)) {
+			const parallelResult = await extractWithParallel(url, signal, options, settings);
 			if (parallelResult) return parallelResult;
 		}
 	} catch (err) {
@@ -706,11 +708,12 @@ function fetchLimitedContent(
 	url: string,
 	signal?: AbortSignal,
 	options?: ExtractOptions,
+	settings: Pick<WebAccessSettings, "parallelApiKey"> = {},
 ): Promise<ExtractedContent> {
 	return fetchLimit.run(async () => {
 		if (signal?.aborted) return abortedResult(url);
 		try {
-			return await extractContent(url, signal, options);
+			return await extractContent(url, signal, options, settings);
 		} catch (error) {
 			if (signal?.aborted) return abortedResult(url);
 			throw error;
@@ -722,6 +725,7 @@ export async function fetchAllContent(
 	urls: string[],
 	signal?: AbortSignal,
 	options?: ExtractOptions,
+	settings: Pick<WebAccessSettings, "parallelApiKey"> = {},
 ): Promise<ExtractedContent[]> {
-	return Promise.all(urls.map((url) => fetchLimitedContent(url, signal, options)));
+	return Promise.all(urls.map((url) => fetchLimitedContent(url, signal, options, settings)));
 }
