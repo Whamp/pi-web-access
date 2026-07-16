@@ -9,7 +9,6 @@ const utilsUrl = new URL("../utils.ts", import.meta.url).href;
 const perplexityUrl = new URL("../perplexity.ts", import.meta.url).href;
 const configurationUrl = new URL("../configuration.ts", import.meta.url).href;
 const geminiApiUrl = new URL("../gemini-api.ts", import.meta.url).href;
-const configurationUrl = new URL("../configuration.ts", import.meta.url).href;
 const geminiWebConfigUrl = new URL("../gemini-web-config.ts", import.meta.url).href;
 const geminiSearchUrl = new URL("../gemini-search.ts", import.meta.url).href;
 
