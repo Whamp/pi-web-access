@@ -1,5 +1,5 @@
-import { existsSync, readFileSync } from "node:fs";
 import { activityMonitor } from "./activity.ts";
+import { getWebAccessConfiguration } from "./configuration.ts";
 import {
 	getApiKey,
 	getVersionedApiBase,
@@ -7,7 +7,6 @@ import {
 	buildAuthHeaders,
 	isGatewayConfigured,
 	isGeminiApiAvailable,
-	DEFAULT_MODEL,
 } from "./gemini-api.ts";
 import { isGeminiWebAvailable, queryWithCookies } from "./gemini-web.ts";
 import type {
@@ -19,7 +18,6 @@ import type {
 	SearchResponse,
 	SearchResult,
 } from "./search-provider.ts";
-import { getWebSearchConfigPath } from "./utils.ts";
 
 export type {
 	AttributedSearchResponse,
@@ -28,60 +26,16 @@ export type {
 	SearchProvider,
 } from "./search-provider.ts";
 
-const CONFIG_PATH = getWebSearchConfigPath();
-let cachedSearchConfig: { searchProvider: SearchProvider; searchModel?: string } | null = null;
-
-function normalizeSearchProvider(value: unknown): SearchProvider {
-	if (typeof value !== "string") return "auto";
-	switch (value.trim().toLowerCase()) {
-		case "auto": return "auto";
-		case "openai": return "openai";
-		case "exa": return "exa";
-		case "brave": return "brave";
-		case "parallel": return "parallel";
-		case "tavily": return "tavily";
-		case "perplexity": return "perplexity";
-		case "gemini": return "gemini";
-		default: return "auto";
-	}
-}
-
-function normalizeSearchModel(value: unknown): string | undefined {
-	if (typeof value !== "string") return undefined;
-	const normalized = value.trim();
-	return normalized.length > 0 ? normalized : undefined;
-}
-
-function getSearchConfig(): { searchProvider: SearchProvider; searchModel?: string } {
-	if (cachedSearchConfig) return cachedSearchConfig;
-	if (!existsSync(CONFIG_PATH)) {
-		cachedSearchConfig = { searchProvider: "auto" };
-		return cachedSearchConfig;
-	}
-
-	const rawText = readFileSync(CONFIG_PATH, "utf-8");
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(rawText);
-	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error);
-		throw new Error(`Failed to parse ${CONFIG_PATH}: ${message}`);
-	}
-	const searchProvider = parsed !== null && typeof parsed === "object"
-		? Reflect.get(parsed, "searchProvider") ?? Reflect.get(parsed, "provider")
-		: undefined;
-	const searchModel = parsed !== null && typeof parsed === "object"
-		? Reflect.get(parsed, "searchModel")
-		: undefined;
-	cachedSearchConfig = {
-		searchProvider: normalizeSearchProvider(searchProvider),
-		searchModel: normalizeSearchModel(searchModel),
+function getSearchConfig(): { searchProvider: SearchProvider; searchModel: string } {
+	const settings = getWebAccessConfiguration().current();
+	return {
+		searchProvider: settings.searchProvider ?? settings.provider,
+		searchModel: settings.searchModel,
 	};
-	return cachedSearchConfig;
 }
 
 function getSearchModel(): string {
-	return getSearchConfig().searchModel ?? DEFAULT_MODEL;
+	return getSearchConfig().searchModel;
 }
 
 function errorMessage(error: unknown): string {
@@ -119,7 +73,7 @@ async function searchWithGemini(query: string, options: SearchOptions): Promise<
 
 	throw new Error(
 		"Gemini search unavailable. Either:\n" +
-		`  1. Set GEMINI_API_KEY in ${CONFIG_PATH}\n` +
+		`  1. Set GEMINI_API_KEY in ${getWebAccessConfiguration().sourcePath}\n` +
 		"  2. Set GOOGLE_GEMINI_BASE_URL + CLOUDFLARE_API_KEY for Cloudflare AI Gateway routing\n" +
 		"  3. Sign into gemini.google.com in a supported Chromium-based browser",
 	);

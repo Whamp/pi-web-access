@@ -8,7 +8,7 @@ import { clearCloneCache } from "./github-extract.ts";
 import type { ResolvedSearchProvider, SearchProvider, SearchResult, WebSearch } from "./search-provider.ts";
 import { createConfiguredWebSearch } from "./web-search.ts";
 import { formatSeconds, getWebSearchConfigPath } from "./utils.ts";
-import { createWebAccessConfiguration, type WebAccessSettings } from "./configuration.ts";
+import { getWebAccessConfiguration, type WebAccessSettings } from "./configuration.ts";
 import {
 	createStoredResultStore,
 	storedResultRetrievalCall,
@@ -420,7 +420,7 @@ function formatEntryLine(
 }
 
 export default function (pi: ExtensionAPI) {
-	const configuration = createWebAccessConfiguration();
+	const configuration = getWebAccessConfiguration();
 	const initConfig = configuration.current();
 	const webSearch = createConfiguredWebSearch(initConfig);
 	const storedResultStore = createStoredResultStore();

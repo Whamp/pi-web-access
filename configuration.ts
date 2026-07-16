@@ -216,6 +216,17 @@ function freezeSettings(settings: WebAccessSettings): Readonly<WebAccessSettings
 	return Object.freeze(settings);
 }
 
+let productionConfiguration: WebAccessConfiguration | undefined;
+
+/**
+ * Returns the one process-wide production configuration, loading it on first use.
+ * Invalid persistent settings throw a key-specific WebAccessConfigurationError.
+ */
+export function getWebAccessConfiguration(): WebAccessConfiguration {
+	productionConfiguration ??= createWebAccessConfiguration();
+	return productionConfiguration;
+}
+
 export function createWebAccessConfiguration(options: WebAccessConfigurationOptions = {}): WebAccessConfiguration {
 	const sourcePath = options.sourcePath ?? getWebSearchConfigPath();
 	let raw: JsonObject = {};
