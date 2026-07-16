@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -107,6 +107,7 @@ async function loadRuntime(config = {}, modelRegistry = unavailableModelRegistry
 	const loadedRuntime = {
 		extension,
 		context,
+		configDir,
 		notifications,
 		sent,
 		entries,
@@ -349,6 +350,77 @@ test("/websearch explicitly starts the curator", async () => {
 	await command("", runtime.context);
 	assert.deepEqual(runtime.notifications[0], { message: "Opening web search curator...", level: "info" });
 	await runtime.shutdown();
+});
+
+test("Search Curator provider changes persist and become current for later work", async () => {
+	const requests = installSearchResponse();
+	const runtime = await loadRuntime({
+		provider: "exa",
+		perplexityApiKey: "preserve-secret",
+		futureSetting: { enabled: true },
+	});
+	const command = runtime.extension.commands.get("websearch")?.handler;
+	assert.ok(command);
+
+	await command("", runtime.context);
+	const fallbackNotice = runtime.notifications.find(({ message }) => message.includes("Open manually:"));
+	const curatorUrl = fallbackNotice?.message.match(/http:\/\/localhost:\d+\/\?session=[a-f0-9-]+/)?.[0];
+	assert.ok(curatorUrl);
+	const session = new URL(curatorUrl).searchParams.get("session");
+	const response = await originalFetch(new URL("/provider", curatorUrl), {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ token: session, provider: "brave" }),
+	});
+	assert.equal(response.status, 200);
+	for (let attempt = 0; attempt < 100; attempt += 1) {
+		const persisted = JSON.parse(await readFile(join(runtime.configDir, "web-search.json"), "utf8"));
+		if (persisted.provider === "brave") break;
+		await new Promise(resolve => setTimeout(resolve, 2));
+	}
+	assert.deepEqual(JSON.parse(await readFile(join(runtime.configDir, "web-search.json"), "utf8")), {
+		provider: "brave",
+		perplexityApiKey: "preserve-secret",
+		futureSetting: { enabled: true },
+	});
+
+	const result = await executeSearch(runtime, { query: "later work" });
+	assert.match(result.content[0].text, /Article/);
+	assert.equal(requests.length, 1);
+});
+
+test("a failed Search Curator provider save reports the error and keeps prior settings current", async () => {
+	const requests = installSearchResponse();
+	const runtime = await loadRuntime({ provider: "brave", braveApiKey: "never-report-this" });
+	const command = runtime.extension.commands.get("websearch")?.handler;
+	assert.ok(command);
+
+	await command("", runtime.context);
+	const fallbackNotice = runtime.notifications.find(({ message }) => message.includes("Open manually:"));
+	const curatorUrl = fallbackNotice?.message.match(/http:\/\/localhost:\d+\/\?session=[a-f0-9-]+/)?.[0];
+	assert.ok(curatorUrl);
+	const session = new URL(curatorUrl).searchParams.get("session");
+	await chmod(runtime.configDir, 0o500);
+	let response;
+	try {
+		response = await originalFetch(new URL("/provider", curatorUrl), {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ token: session, provider: "exa" }),
+		});
+	} finally {
+		await chmod(runtime.configDir, 0o700);
+	}
+	assert.equal(response.status, 500);
+	const failure = await response.json();
+	assert.match(failure.error, /Unable to save Web Access configuration/);
+	assert.match(failure.error, /previous settings remain active/);
+	assert.doesNotMatch(failure.error, /never-report-this/);
+	assert.equal(JSON.parse(await readFile(join(runtime.configDir, "web-search.json"), "utf8")).provider, "brave");
+
+	const result = await executeSearch(runtime, { query: "work after failed save" });
+	assert.match(result.content[0].text, /Article/);
+	assert.equal(requests.length, 1);
 });
 
 test("/websearch publishes a retrievable searchResultId after explicit summary approval", async () => {

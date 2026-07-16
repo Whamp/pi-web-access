@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import fc from "fast-check";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 
 import { createWebAccessConfiguration, WebAccessConfigurationError } from "../configuration.ts";
@@ -114,6 +114,102 @@ test("current settings are deeply immutable and manual edits are not reloaded", 
 	assert.strictEqual(configuration.current(), current);
 	assert.equal(configuration.current().provider, "brave");
 	assert.equal(configuration.current().video.maxSizeMB, 10);
+});
+
+test("updating the default provider persists only that change and replaces later settings", async () => {
+	const sourcePath = await temporaryConfigPath();
+	const original = {
+		provider: "brave",
+		perplexityApiKey: "credential-value",
+		video: { maxSizeMB: 25, futureCodec: { name: "future" } },
+		futureTopLevel: [1, { enabled: true }],
+	};
+	await writeFile(sourcePath, JSON.stringify(original));
+	const configuration = createWebAccessConfiguration({ sourcePath, warn: () => {} });
+	const inFlight = configuration.current();
+
+	await configuration.update({ provider: "exa" });
+
+	assert.equal(inFlight.provider, "brave");
+	assert.notStrictEqual(configuration.current(), inFlight);
+	assert.equal(configuration.current().provider, "exa");
+	assert.deepEqual(JSON.parse(await readFile(sourcePath, "utf8")), {
+		...original,
+		provider: "exa",
+	});
+});
+
+test("updates create missing parents and atomically replace files without changing their permissions", async () => {
+	const directory = await mkdtemp(join(tmpdir(), "pi-web-access-update-"));
+	const sourcePath = join(directory, "nested", "web-search.json");
+	const configuration = createWebAccessConfiguration({ sourcePath });
+	await configuration.update({ provider: "brave" });
+	assert.equal((await stat(sourcePath)).mode & 0o777, 0o600);
+
+	await chmod(sourcePath, 0o640);
+	const previousInode = (await stat(sourcePath)).ino;
+	await configuration.update({ provider: "exa" });
+	const replacement = await stat(sourcePath);
+	assert.notEqual(replacement.ino, previousInode);
+	assert.equal(replacement.mode & 0o777, 0o640);
+	assert.deepEqual(await readdir(join(directory, "nested")), ["web-search.json"]);
+});
+
+test("a failed write keeps the saved file and current settings unchanged without disclosing credentials", async () => {
+	const sourcePath = await temporaryConfigPath();
+	await writeFile(sourcePath, JSON.stringify({ provider: "brave", perplexityApiKey: "never-report-this" }));
+	const previousFile = await readFile(sourcePath, "utf8");
+	const configuration = createWebAccessConfiguration({ sourcePath });
+	const previous = configuration.current();
+	const parent = dirname(sourcePath);
+	await chmod(parent, 0o500);
+	try {
+		await assert.rejects(configuration.update({ provider: "exa" }), error => {
+			assert.match(error.message, /Unable to save Web Access configuration/);
+			assert.match(error.message, /previous settings remain active/);
+			assert.doesNotMatch(error.message, /never-report-this/);
+			return true;
+		});
+	} finally {
+		await chmod(parent, 0o700);
+	}
+	assert.strictEqual(configuration.current(), previous);
+	assert.equal(await readFile(sourcePath, "utf8"), previousFile);
+});
+
+test("a failed atomic replacement leaves the prior current settings and target intact", async () => {
+	const directory = await mkdtemp(join(tmpdir(), "pi-web-access-replacement-"));
+	const sourcePath = join(directory, "web-search.json");
+	const configuration = createWebAccessConfiguration({ sourcePath });
+	const previous = configuration.current();
+	await mkdir(sourcePath);
+
+	await assert.rejects(configuration.update({ provider: "exa" }), /atomically replace/);
+	assert.strictEqual(configuration.current(), previous);
+	assert.equal((await stat(sourcePath)).isDirectory(), true);
+	assert.deepEqual(await readdir(directory), ["web-search.json"]);
+});
+
+test("generated unknown fields survive a supported provider update", async () => {
+	const knownTopLevel = new Set([
+		"provider", "searchProvider", "webSearch", "allowBrowserCookies", "workflow", "curatorTimeoutSeconds",
+		"githubClone", "youtube", "video", "shortcuts", "ssrf", "openaiApiKey", "braveApiKey", "exaApiKey",
+		"parallelApiKey", "tavilyApiKey", "perplexityApiKey", "geminiApiKey", "geminiBaseUrl", "cloudflareApiKey",
+		"chromeProfile", "searchModel", "summaryModel",
+	]);
+	await fc.assert(fc.asyncProperty(
+		fc.dictionary(fc.string({ minLength: 1 }).filter(key => !knownTopLevel.has(key)), fc.jsonValue()),
+		fc.dictionary(fc.string({ minLength: 1 }).filter(key => !["maxSizeMB", "enabled", "preferredModel"].includes(key)), fc.jsonValue()),
+		async (unknownTopLevel, unknownVideo) => {
+			const sourcePath = await temporaryConfigPath();
+			const raw = { ...unknownTopLevel, provider: "brave", video: { ...unknownVideo, maxSizeMB: 31 } };
+			const persistedRaw = JSON.parse(JSON.stringify(raw));
+			await writeFile(sourcePath, JSON.stringify(raw));
+			const configuration = createWebAccessConfiguration({ sourcePath, warn: () => {} });
+			await configuration.update({ provider: "exa" });
+			assert.deepEqual(JSON.parse(await readFile(sourcePath, "utf8")), { ...persistedRaw, provider: "exa" });
+		}
+	), { numRuns: 40 });
 });
 
 test("generated valid settings normalize to a stable current value", async () => {

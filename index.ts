@@ -7,7 +7,7 @@ import { normalizeFetchContentParams } from "./fetch-params.ts";
 import { clearCloneCache } from "./github-extract.ts";
 import type { ResolvedSearchProvider, SearchProvider, SearchResult } from "./search-provider.ts";
 import { webSearch } from "./web-search.ts";
-import { formatSeconds, getWebSearchConfigDir, getWebSearchConfigPath } from "./utils.ts";
+import { formatSeconds, getWebSearchConfigPath } from "./utils.ts";
 import { createWebAccessConfiguration, type WebAccessSettings } from "./configuration.ts";
 import {
 	createStoredResultStore,
@@ -26,7 +26,7 @@ import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { platform } from "node:os";
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { getActiveGoogleEmail, isGeminiWebAvailable } from "./gemini-web.ts";
 import { isBrowserCookieAccessAllowed } from "./gemini-web-config.ts";
@@ -71,24 +71,6 @@ interface CuratorBootstrap {
 	availableProviders: ProviderAvailability;
 	defaultProvider: ResolvedSearchProvider;
 	timeoutSeconds: number;
-}
-
-function saveConfig(updates: Partial<Pick<WebAccessSettings, "provider">>): void {
-	let config: Record<string, unknown> = {};
-	if (existsSync(WEB_SEARCH_CONFIG_PATH)) {
-		const raw = readFileSync(WEB_SEARCH_CONFIG_PATH, "utf-8");
-		try {
-			config = JSON.parse(raw) as Record<string, unknown>;
-		} catch (err) {
-			const message = err instanceof Error ? err.message : String(err);
-			throw new Error(`Failed to parse ${WEB_SEARCH_CONFIG_PATH}: ${message}`);
-		}
-	}
-
-	Object.assign(config, updates);
-	const dir = getWebSearchConfigDir();
-	if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-	writeFileSync(WEB_SEARCH_CONFIG_PATH, JSON.stringify(config, null, 2) + "\n");
 }
 
 function normalizeProviderInput(value: unknown): SearchProvider | undefined {
@@ -715,6 +697,7 @@ export default function (pi: ExtensionAPI) {
 
 	async function loadSummaryModelChoices(
 		summaryContext: SummaryGenerationContext,
+		settings: Readonly<WebAccessSettings>,
 	): Promise<{ summaryModels: Array<{ value: string; label: string }>; defaultSummaryModel: string | null }> {
 		const summaryModels: Array<{ value: string; label: string }> = [];
 		const seen = new Set<string>();
@@ -751,7 +734,7 @@ export default function (pi: ExtensionAPI) {
 			addModel(summaryContext.model.provider, summaryContext.model.id);
 		}
 
-		const configuredSummaryModel = initConfig.summaryModel ?? "";
+		const configuredSummaryModel = settings.summaryModel ?? "";
 		const preferredDefaults = [
 			"anthropic/claude-haiku-4-5",
 			"openai-codex/gpt-5.3-codex-spark",
@@ -1014,18 +997,13 @@ export default function (pi: ExtensionAPI) {
 						}
 						closeCurator(callId);
 					},
-					onProviderChange(provider) {
+					async onProviderChange(provider) {
 						if (pendingCurates.get(callId) !== pc) return;
 						const normalized = normalizeProviderInput(provider);
 						if (!normalized || normalized === "auto") return;
+						await configuration.update({ provider: normalized });
 						pc.defaultProvider = normalized;
 						pc.searchProvider = normalized;
-						try {
-							saveConfig({ provider: normalized });
-						} catch (err) {
-							const message = err instanceof Error ? err.message : String(err);
-							console.error(`Failed to persist default provider: ${message}`);
-						}
 					},
 					async onAddSearch(query, queryIndex, provider) {
 						if (pendingCurates.get(callId) !== pc) throw new Error("Curator session is no longer active.");
@@ -1214,6 +1192,7 @@ export default function (pi: ExtensionAPI) {
 		}),
 
 		async execute(callId, params, signal, onUpdate, ctx) {
+			const workSettings = configuration.current();
 			const sessionController = new AbortController();
 			activeSearches.set(callId, sessionController);
 			const executionSignal = signal ? AbortSignal.any([signal, sessionController.signal]) : sessionController.signal;
@@ -1222,7 +1201,7 @@ export default function (pi: ExtensionAPI) {
 				? params.queries
 				: (params.query !== undefined ? [params.query] : []);
 			const queryList = normalizeQueryList(rawQueryList);
-			const resolvedWorkflow = resolveAgentWorkflow(params.workflow ?? initConfig.workflow);
+			const resolvedWorkflow = resolveAgentWorkflow(params.workflow ?? workSettings.workflow);
 			const workflow = resolvedWorkflow.workflow;
 
 			if (queryList.length === 0) {
@@ -1235,7 +1214,7 @@ export default function (pi: ExtensionAPI) {
 			const searchResults: QueryResultData[] = [];
 			const allUrls: string[] = [];
 			const allInlineContent: ExtractedContent[] = [];
-			const resolvedProvider = normalizeProviderInput(params.provider ?? initConfig.provider);
+			const resolvedProvider = normalizeProviderInput(params.provider ?? workSettings.provider);
 
 			for (let i = 0; i < queryList.length; i++) {
 				const query = queryList[i];
@@ -1292,7 +1271,7 @@ export default function (pi: ExtensionAPI) {
 					cwd: ctx.cwd,
 					isProjectTrusted: () => ctx.isProjectTrusted(),
 				};
-				const summaryModelChoices = await loadSummaryModelChoices(summaryContext);
+				const summaryModelChoices = await loadSummaryModelChoices(summaryContext, workSettings);
 				const generated = await generateSummaryDraft(searchResults, summaryContext, executionSignal, summaryModelChoices.defaultSummaryModel ?? undefined);
 				approvedSummary = generated.summary;
 				summaryMeta = generated.meta;
@@ -1929,6 +1908,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("websearch", {
 		description: "Open web search curator",
 		handler: async (args, ctx) => {
+			const workSettings = configuration.current();
 			const sessionToken = randomUUID();
 			const commandCallId = `cmd:${sessionToken}`;
 			closeCurator(commandCallId);
@@ -1940,7 +1920,7 @@ export default function (pi: ExtensionAPI) {
 
 			let bootstrap: CuratorBootstrap;
 			try {
-				bootstrap = await loadCuratorBootstrap(undefined, ctx, initConfig);
+				bootstrap = await loadCuratorBootstrap(undefined, ctx, workSettings);
 			} catch (err) {
 				const message = err instanceof Error ? err.message : String(err);
 				ctx.ui.notify(`Failed to load web search config: ${message}`, "error");
@@ -1950,7 +1930,7 @@ export default function (pi: ExtensionAPI) {
 			const initialProvider = bootstrap.defaultProvider;
 			const curatorTimeoutSeconds = bootstrap.timeoutSeconds;
 			let currentProvider = initialProvider;
-			const rawSearchProvider = normalizeProviderInput(initConfig.searchProvider ?? initConfig.provider) ?? "auto";
+			const rawSearchProvider = normalizeProviderInput(workSettings.searchProvider ?? workSettings.provider) ?? "auto";
 			let currentSearchProvider = rawSearchProvider;
 			const summaryContext: SummaryGenerationContext = {
 				model: ctx.model,
@@ -1958,7 +1938,7 @@ export default function (pi: ExtensionAPI) {
 				cwd: ctx.cwd,
 				isProjectTrusted: () => ctx.isProjectTrusted(),
 			};
-			const summaryModelChoices = await loadSummaryModelChoices(summaryContext);
+			const summaryModelChoices = await loadSummaryModelChoices(summaryContext, workSettings);
 
 			ctx.ui.notify("Opening web search curator...", "info");
 
@@ -2048,18 +2028,13 @@ export default function (pi: ExtensionAPI) {
 							}
 							closeCurator(commandCallId);
 						},
-						onProviderChange(provider) {
+						async onProviderChange(provider) {
 							if (commandHandle && !isCommandActive()) return;
 							const normalized = normalizeProviderInput(provider);
 							if (!normalized || normalized === "auto") return;
+							await configuration.update({ provider: normalized });
 							currentProvider = normalized;
 							currentSearchProvider = normalized;
-							try {
-								saveConfig({ provider: normalized });
-							} catch (err) {
-								const message = err instanceof Error ? err.message : String(err);
-								console.error(`Failed to persist default provider: ${message}`);
-							}
 						},
 						async onAddSearch(query, queryIndex, provider) {
 							if (commandHandle && !isCommandActive()) {

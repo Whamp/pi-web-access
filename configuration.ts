@@ -1,4 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
+import { mkdir, open, rename, stat, unlink } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { basename, dirname, join } from "node:path";
 import { validateSsrfAllowRanges } from "./ssrf-protection.ts";
 import { getWebSearchConfigPath } from "./utils.ts";
 
@@ -46,6 +49,8 @@ export class WebAccessConfigurationError extends Error {
 export interface WebAccessConfiguration {
 	readonly sourcePath: string;
 	current(): Readonly<WebAccessSettings>;
+	/** Persist the one setting Search Curator currently changes without exposing storage operations to callers. */
+	update(updates: Readonly<Pick<WebAccessSettings, "provider">>): Promise<void>;
 }
 
 export interface WebAccessConfigurationOptions {
@@ -223,8 +228,56 @@ export function createWebAccessConfiguration(options: WebAccessConfigurationOpti
 		}
 		raw = objectAt(parsed, sourcePath, "$");
 	}
-	const settings = normalize(raw, sourcePath);
+	let settings = normalize(raw, sourcePath);
 	const unknown = unknownKeys(raw);
 	if (unknown.length > 0) (options.warn ?? console.warn)(`Unknown Web Access configuration keys in ${sourcePath}: ${unknown.join(", ")}`);
-	return { sourcePath, current: () => settings };
+
+	async function persistUpdate(updates: Readonly<Pick<WebAccessSettings, "provider">>): Promise<void> {
+		const nextRaw = structuredClone(raw);
+		nextRaw.provider = providerAt(updates.provider, sourcePath, "provider");
+		const nextSettings = normalize(nextRaw, sourcePath);
+		const serialized = `${JSON.stringify(nextRaw, null, 2)}\n`;
+		const parent = dirname(sourcePath);
+		const temporaryPath = join(parent, `.${basename(sourcePath)}.${randomUUID()}.tmp`);
+		let stage = "create its parent directory";
+		let handle: Awaited<ReturnType<typeof open>> | undefined;
+		try {
+			await mkdir(parent, { recursive: true });
+			let mode = 0o600;
+			stage = "inspect existing file permissions";
+			try {
+				mode = (await stat(sourcePath)).mode & 0o777;
+			} catch (error) {
+				if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+			}
+			stage = "write its temporary file";
+			handle = await open(temporaryPath, "wx", mode);
+			await handle.writeFile(serialized, "utf8");
+			stage = "sync its temporary file";
+			await handle.sync();
+			stage = "set its file permissions";
+			await handle.chmod(mode);
+			stage = "close its temporary file";
+			await handle.close();
+			handle = undefined;
+			stage = "atomically replace the configuration file";
+			await rename(temporaryPath, sourcePath);
+		} catch (error) {
+			await handle?.close().catch(() => {});
+			await unlink(temporaryPath).catch(() => {});
+			const cause = error instanceof Error && "code" in error && typeof error.code === "string" ? ` (${error.code})` : "";
+			throw new Error(`Unable to save Web Access configuration at ${sourcePath}: failed to ${stage}${cause}; previous settings remain active.`);
+		}
+		raw = nextRaw;
+		settings = nextSettings;
+	}
+
+	let updateQueue = Promise.resolve();
+	function update(updates: Readonly<Pick<WebAccessSettings, "provider">>): Promise<void> {
+		const result = updateQueue.then(() => persistUpdate(updates));
+		updateQueue = result.catch(() => {});
+		return result;
+	}
+
+	return { sourcePath, current: () => settings, update };
 }
