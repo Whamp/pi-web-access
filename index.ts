@@ -8,6 +8,7 @@ import { clearCloneCache } from "./github-extract.ts";
 import type { ResolvedSearchProvider, SearchProvider, SearchResult } from "./search-provider.ts";
 import { webSearch } from "./web-search.ts";
 import { formatSeconds, getWebSearchConfigDir, getWebSearchConfigPath } from "./utils.ts";
+import { createWebAccessConfiguration, type WebAccessSettings } from "./configuration.ts";
 import {
 	createStoredResultStore,
 	storedResultRetrievalCall,
@@ -52,24 +53,6 @@ function renderSearchErrorPlan(plan: SearchErrorPlan, expanded: boolean, theme: 
 	return box;
 }
 
-interface WebSearchConfig {
-	provider?: string;
-	workflow?: string;
-	curatorTimeoutSeconds?: unknown;
-	summaryModel?: string;
-	webSearch?: {
-		enabled?: boolean;
-	};
-	shortcuts?: {
-		curate?: string;
-		activity?: string;
-	};
-	ssrf?: {
-		/** CIDR ranges exempted from the SSRF guard (e.g. fake-IP proxy ranges). */
-		allowRanges?: string[];
-	};
-}
-
 interface ProviderAvailability {
 	openai: boolean;
 	brave: boolean;
@@ -90,18 +73,7 @@ interface CuratorBootstrap {
 	timeoutSeconds: number;
 }
 
-function loadConfig(): WebSearchConfig {
-	if (!existsSync(WEB_SEARCH_CONFIG_PATH)) return {};
-	const raw = readFileSync(WEB_SEARCH_CONFIG_PATH, "utf-8");
-	try {
-		return JSON.parse(raw) as WebSearchConfig;
-	} catch (err) {
-		const message = err instanceof Error ? err.message : String(err);
-		throw new Error(`Failed to parse ${WEB_SEARCH_CONFIG_PATH}: ${message}`);
-	}
-}
-
-function saveConfig(updates: Partial<WebSearchConfig>): void {
+function saveConfig(updates: Partial<Pick<WebAccessSettings, "provider">>): void {
 	let config: Record<string, unknown> = {};
 	if (existsSync(WEB_SEARCH_CONFIG_PATH)) {
 		const raw = readFileSync(WEB_SEARCH_CONFIG_PATH, "utf-8");
@@ -119,33 +91,12 @@ function saveConfig(updates: Partial<WebSearchConfig>): void {
 	writeFileSync(WEB_SEARCH_CONFIG_PATH, JSON.stringify(config, null, 2) + "\n");
 }
 
-const DEFAULT_SHORTCUTS = { curate: "ctrl+shift+s", activity: "ctrl+shift+w" };
-const DEFAULT_CURATOR_TIMEOUT_SECONDS = 20;
-const MAX_CURATOR_TIMEOUT_SECONDS = 600;
-
-function loadConfigForExtensionInit(): WebSearchConfig {
-	try {
-		return loadConfig();
-	} catch (err) {
-		const message = err instanceof Error ? err.message : String(err);
-		console.error(`[pi-web-access] ${message}`);
-		return {};
-	}
-}
-
 function normalizeProviderInput(value: unknown): SearchProvider | undefined {
 	if (value === undefined) return undefined;
 	if (typeof value !== "string") return "auto";
 	const normalized = value.trim().toLowerCase();
 	const valid: SearchProvider[] = ["auto", "openai", "brave", "parallel", "tavily", "exa", "perplexity", "gemini"];
 	return valid.includes(normalized as SearchProvider) ? normalized as SearchProvider : "auto";
-}
-
-function normalizeCuratorTimeoutSeconds(value: unknown): number | undefined {
-	if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
-	const normalized = Math.floor(value);
-	if (normalized < 1) return undefined;
-	return Math.min(normalized, MAX_CURATOR_TIMEOUT_SECONDS);
 }
 
 interface ResolvedAgentWorkflow {
@@ -175,9 +126,8 @@ function normalizeQueryList(queryList: unknown[]): string[] {
 	return normalized;
 }
 
-function getCuratorTimeoutSeconds(): number {
-	const source = loadConfig();
-	return normalizeCuratorTimeoutSeconds(source.curatorTimeoutSeconds) ?? DEFAULT_CURATOR_TIMEOUT_SECONDS;
+function getCuratorTimeoutSeconds(settings: Readonly<WebAccessSettings>): number {
+	return settings.curatorTimeoutSeconds;
 }
 
 async function getProviderAvailability(ctx: ExtensionContext): Promise<ProviderAvailability> {
@@ -205,13 +155,14 @@ function shouldPreferOpenAI(options?: Pick<PendingCurate, "numResults" | "recenc
 async function loadCuratorBootstrap(
 	requestedProvider: unknown,
 	ctx: ExtensionContext,
+	settings: Readonly<WebAccessSettings>,
 	options?: Pick<PendingCurate, "numResults" | "recencyFilter">,
 ): Promise<CuratorBootstrap> {
 	const availableProviders = await getProviderAvailability(ctx);
 	return {
 		availableProviders,
-		defaultProvider: resolveProvider(requestedProvider, availableProviders, options),
-		timeoutSeconds: getCuratorTimeoutSeconds(),
+		defaultProvider: resolveProvider(requestedProvider, availableProviders, settings, options),
+		timeoutSeconds: getCuratorTimeoutSeconds(settings),
 	};
 }
 
@@ -229,9 +180,10 @@ function firstAvailableProvider(available: ProviderAvailability, preferOpenAI: b
 function resolveProvider(
 	requested: unknown,
 	available: ProviderAvailability,
+	settings: Readonly<WebAccessSettings>,
 	options?: Pick<PendingCurate, "numResults" | "recencyFilter">,
 ): ResolvedSearchProvider {
-	const provider = normalizeProviderInput(requested ?? loadConfig().provider ?? "auto") ?? "auto";
+	const provider = normalizeProviderInput(requested ?? settings.provider) ?? "auto";
 	const preferOpenAI = shouldPreferOpenAI(options);
 
 	if (provider === "auto") {
@@ -485,10 +437,11 @@ function formatEntryLine(
 }
 
 export default function (pi: ExtensionAPI) {
+	const configuration = createWebAccessConfiguration();
+	const initConfig = configuration.current();
 	const storedResultStore = createStoredResultStore();
-	const initConfig = loadConfigForExtensionInit();
-	const curateKey = initConfig.shortcuts?.curate || DEFAULT_SHORTCUTS.curate;
-	const activityKey = initConfig.shortcuts?.activity || DEFAULT_SHORTCUTS.activity;
+	const curateKey = initConfig.shortcuts.curate;
+	const activityKey = initConfig.shortcuts.activity;
 	const activeSearches = new Map<string, AbortController>();
 
 	function abortActiveSearches(): void {
@@ -798,8 +751,7 @@ export default function (pi: ExtensionAPI) {
 			addModel(summaryContext.model.provider, summaryContext.model.id);
 		}
 
-		const config = loadConfig();
-		const configuredSummaryModel = typeof config.summaryModel === "string" ? config.summaryModel.trim() : "";
+		const configuredSummaryModel = initConfig.summaryModel ?? "";
 		const preferredDefaults = [
 			"anthropic/claude-haiku-4-5",
 			"openai-codex/gpt-5.3-codex-spark",
@@ -1270,8 +1222,7 @@ export default function (pi: ExtensionAPI) {
 				? params.queries
 				: (params.query !== undefined ? [params.query] : []);
 			const queryList = normalizeQueryList(rawQueryList);
-			const configWorkflow = loadConfigForExtensionInit().workflow;
-			const resolvedWorkflow = resolveAgentWorkflow(params.workflow ?? configWorkflow);
+			const resolvedWorkflow = resolveAgentWorkflow(params.workflow ?? initConfig.workflow);
 			const workflow = resolvedWorkflow.workflow;
 
 			if (queryList.length === 0) {
@@ -1284,7 +1235,7 @@ export default function (pi: ExtensionAPI) {
 			const searchResults: QueryResultData[] = [];
 			const allUrls: string[] = [];
 			const allInlineContent: ExtractedContent[] = [];
-			const resolvedProvider = normalizeProviderInput(params.provider ?? loadConfig().provider);
+			const resolvedProvider = normalizeProviderInput(params.provider ?? initConfig.provider);
 
 			for (let i = 0; i < queryList.length; i++) {
 				const query = queryList[i];
@@ -1989,7 +1940,7 @@ export default function (pi: ExtensionAPI) {
 
 			let bootstrap: CuratorBootstrap;
 			try {
-				bootstrap = await loadCuratorBootstrap(undefined, ctx);
+				bootstrap = await loadCuratorBootstrap(undefined, ctx, initConfig);
 			} catch (err) {
 				const message = err instanceof Error ? err.message : String(err);
 				ctx.ui.notify(`Failed to load web search config: ${message}`, "error");
@@ -1999,7 +1950,7 @@ export default function (pi: ExtensionAPI) {
 			const initialProvider = bootstrap.defaultProvider;
 			const curatorTimeoutSeconds = bootstrap.timeoutSeconds;
 			let currentProvider = initialProvider;
-			const rawSearchProvider = normalizeProviderInput(loadConfig().provider ?? "auto") ?? "auto";
+			const rawSearchProvider = normalizeProviderInput(initConfig.searchProvider ?? initConfig.provider) ?? "auto";
 			let currentSearchProvider = rawSearchProvider;
 			const summaryContext: SummaryGenerationContext = {
 				model: ctx.model,

@@ -191,6 +191,11 @@ function parseIPv6(address: string): number[] | null {
 	return groups.length === 8 && groups.every(group => group >= 0 && group <= 0xffff) ? groups : null;
 }
 
+/** Validate the persistent SSRF exception list before retrieval starts. */
+export function validateSsrfAllowRanges(input: unknown): void {
+	parseAllowRanges(input);
+}
+
 /** Parse `allowRanges` config value into validated CIDR rules. Throws on malformed entries. */
 function parseAllowRanges(input: unknown): ParsedCidr[] {
 	if (input === undefined || input === null) return [];

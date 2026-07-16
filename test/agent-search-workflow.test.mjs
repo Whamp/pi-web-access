@@ -120,15 +120,18 @@ async function loadRuntime(config = {}, modelRegistry = unavailableModelRegistry
 }
 
 function installSearchResponse() {
+	const requests = [];
 	globalThis.fetch = async (url) => {
 		const requestUrl = String(url);
 		if (requestUrl.startsWith("https://api.search.brave.com/res/v1/web/search")) {
+			requests.push(requestUrl);
 			return new Response(JSON.stringify({
 				web: { results: [{ title: "Article", url: "https://example.com/article", description: "Result" }] },
 			}), { status: 200, headers: { "content-type": "application/json" } });
 		}
 		throw new Error(`Unexpected fetch: ${requestUrl}`);
 	};
+	return requests;
 }
 
 async function executeSearch(runtime, params) {
@@ -148,6 +151,16 @@ test("web_search defaults to non-curated execution even when UI is available", a
 	const result = await executeSearch(runtime, { query: "agent search", provider: "brave" });
 	assert.match(result.content[0].text, /Article/);
 	assert.equal(runtime.notifications.length, 0);
+});
+
+test("registered web_search uses the saved startup provider when the call omits one", async () => {
+	const requests = installSearchResponse();
+	const runtime = await loadRuntime({ provider: "brave" });
+	const result = await executeSearch(runtime, { query: "saved provider" });
+
+	assert.match(result.content[0].text, /Article/);
+	assert.equal(requests.length, 1);
+	assert.match(requests[0], /^https:\/\/api\.search\.brave\.com\/res\/v1\/web\/search/);
 });
 
 test("registered schema accepts supported workflows and rejects unknown modes", async () => {
