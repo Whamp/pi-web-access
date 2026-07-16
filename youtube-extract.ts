@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { DEFAULT_MEDIA_SETTINGS, type MediaSettings } from "./configuration.ts";
 import { activityMonitor } from "./activity.ts";
 import { settleWithAbort } from "./abort.ts";
 import { isGeminiWebAvailable, queryWithCookies } from "./gemini-web.ts";
@@ -7,9 +7,7 @@ import { isGeminiApiAvailable, queryGeminiApiWithVideo } from "./gemini-api.ts";
 import { isPerplexityAvailable, searchWithPerplexity } from "./perplexity.ts";
 import { extractHeadingTitle, type ExtractedContent, type FrameResult, type VideoFrame } from "./extract.ts";
 import { abandonResponseBody, discardResponseBody, readResponseBytes } from "./response-body.ts";
-import { formatSeconds, readExecError, isTimeoutError, trimErrorText, mapFfmpegError, getWebSearchConfigPath } from "./utils.ts";
-
-const CONFIG_PATH = getWebSearchConfigPath();
+import { formatSeconds, readExecError, isTimeoutError, trimErrorText, mapFfmpegError } from "./utils.ts";
 
 const YOUTUBE_PROMPT = `Extract the complete content of this YouTube video. Include:
 1. Video title, channel name, and duration
@@ -35,48 +33,6 @@ function addAttemptError(errors: string[], label: string, err: unknown): void {
 	if (message) errors.push(`${label}: ${message}`);
 }
 
-interface YouTubeConfig {
-	enabled: boolean;
-	preferredModel: string;
-}
-
-function normalizePreferredModel(value: unknown, fallback: string): string {
-	if (typeof value !== "string") return fallback;
-	const normalized = value.trim();
-	return normalized.length > 0 ? normalized : fallback;
-}
-
-function normalizeEnabled(value: unknown, fallback: boolean): boolean {
-	return typeof value === "boolean" ? value : fallback;
-}
-
-const defaults: YouTubeConfig = { enabled: true, preferredModel: "gemini-3-flash-preview" };
-let cachedConfig: YouTubeConfig | null = null;
-
-function loadYouTubeConfig(): YouTubeConfig {
-	if (cachedConfig) return cachedConfig;
-	if (!existsSync(CONFIG_PATH)) {
-		cachedConfig = { ...defaults };
-		return cachedConfig;
-	}
-
-	const rawText = readFileSync(CONFIG_PATH, "utf-8");
-	let raw: { youtube?: { enabled?: boolean; preferredModel?: string } };
-	try {
-		raw = JSON.parse(rawText) as { youtube?: { enabled?: boolean; preferredModel?: string } };
-	} catch (err) {
-		const message = err instanceof Error ? err.message : String(err);
-		throw new Error(`Failed to parse ${CONFIG_PATH}: ${message}`);
-	}
-
-	const yt = raw.youtube ?? {};
-	cachedConfig = {
-		enabled: normalizeEnabled(yt.enabled, defaults.enabled),
-		preferredModel: normalizePreferredModel(yt.preferredModel, defaults.preferredModel),
-	};
-	return cachedConfig;
-}
-
 export function isYouTubeURL(url: string): { isYouTube: boolean; videoId: string | null } {
 	try {
 		const parsed = new URL(url);
@@ -91,8 +47,8 @@ export function isYouTubeURL(url: string): { isYouTube: boolean; videoId: string
 	return { isYouTube: true, videoId: match[1] };
 }
 
-export function isYouTubeEnabled(): boolean {
-	return loadYouTubeConfig().enabled;
+export function isYouTubeEnabled(settings: MediaSettings["youtube"] = DEFAULT_MEDIA_SETTINGS.youtube): boolean {
+	return settings.enabled;
 }
 
 export async function extractYouTube(
@@ -100,14 +56,14 @@ export async function extractYouTube(
 	signal?: AbortSignal,
 	prompt?: string,
 	model?: string,
+	settings: MediaSettings["youtube"] = DEFAULT_MEDIA_SETTINGS.youtube,
 ): Promise<ExtractedContent | null> {
-	const config = loadYouTubeConfig();
 	const { videoId } = isYouTubeURL(url);
 	const canonicalUrl = videoId
 		? `https://www.youtube.com/watch?v=${videoId}`
 		: url;
 	const effectivePrompt = prompt ?? YOUTUBE_PROMPT;
-	const effectiveModel = model ?? config.preferredModel;
+	const effectiveModel = model ?? settings.preferredModel;
 
 	const activityId = activityMonitor.logStart({ type: "fetch", url: `youtube.com/${videoId ?? "video"}` });
 	const attemptErrors: string[] = [];

@@ -8,6 +8,11 @@ import { getWebSearchConfigPath } from "./utils.ts";
 export type SearchProviderSetting = "auto" | "openai" | "brave" | "parallel" | "tavily" | "exa" | "perplexity" | "gemini";
 export type WorkflowSetting = "none" | "auto-summary" | "summary-review";
 
+export interface MediaSettings {
+	readonly youtube: Readonly<{ enabled: boolean; preferredModel: string }>;
+	readonly video: Readonly<{ enabled: boolean; preferredModel: string; maxSizeMB: number }>;
+}
+
 export interface WebAccessSettings {
 	readonly provider: SearchProviderSetting;
 	readonly webSearch: Readonly<{ enabled: boolean }>;
@@ -15,8 +20,8 @@ export interface WebAccessSettings {
 	readonly workflow: WorkflowSetting;
 	readonly curatorTimeoutSeconds: number;
 	readonly githubClone: Readonly<{ enabled: boolean; maxRepoSizeMB: number; cloneTimeoutSeconds: number; clonePath: string }>;
-	readonly youtube: Readonly<{ enabled: boolean; preferredModel: string }>;
-	readonly video: Readonly<{ enabled: boolean; preferredModel: string; maxSizeMB: number }>;
+	readonly youtube: MediaSettings["youtube"];
+	readonly video: MediaSettings["video"];
 	readonly shortcuts: Readonly<{ curate: string; activity: string }>;
 	readonly ssrf: Readonly<{ allowRanges: readonly string[] }>;
 	readonly openaiApiKey?: string;
@@ -77,6 +82,13 @@ const NESTED_KEYS: Record<string, ReadonlySet<string>> = {
 	ssrf: new Set(["allowRanges"]),
 };
 
+// Direct extraction callers need documented media defaults without reading the
+// configuration file. Production operations receive a startup-validated snapshot.
+export const DEFAULT_MEDIA_SETTINGS: Readonly<MediaSettings> = Object.freeze({
+	youtube: Object.freeze({ enabled: true, preferredModel: "gemini-3-flash-preview" }),
+	video: Object.freeze({ enabled: true, preferredModel: "gemini-3-flash-preview", maxSizeMB: 50 }),
+});
+
 export const DEFAULT_WEB_ACCESS_SETTINGS: Readonly<WebAccessSettings> = freezeSettings({
 	provider: "auto",
 	webSearch: { enabled: true },
@@ -85,8 +97,8 @@ export const DEFAULT_WEB_ACCESS_SETTINGS: Readonly<WebAccessSettings> = freezeSe
 	workflow: "none",
 	curatorTimeoutSeconds: 20,
 	githubClone: { enabled: true, maxRepoSizeMB: 350, cloneTimeoutSeconds: 30, clonePath: "/tmp/pi-github-repos" },
-	youtube: { enabled: true, preferredModel: "gemini-3-flash-preview" },
-	video: { enabled: true, preferredModel: "gemini-3-flash-preview", maxSizeMB: 50 },
+	youtube: DEFAULT_MEDIA_SETTINGS.youtube,
+	video: DEFAULT_MEDIA_SETTINGS.video,
 	shortcuts: { curate: "ctrl+shift+s", activity: "ctrl+shift+w" },
 	ssrf: { allowRanges: [] },
 });

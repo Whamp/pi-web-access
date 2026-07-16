@@ -2,6 +2,7 @@ import { Readability } from "@mozilla/readability";
 import { parseHTML } from "linkedom";
 import TurndownService from "turndown";
 import { activityMonitor } from "./activity.ts";
+import { DEFAULT_MEDIA_SETTINGS, type MediaSettings } from "./configuration.ts";
 import { settleWithAbort } from "./abort.ts";
 import { createAbortableLimiter } from "./abortable-limit.ts";
 import { extractRSCContent } from "./rsc-extract.ts";
@@ -76,6 +77,8 @@ export interface ExtractOptions {
 	timestamp?: string;
 	frames?: number;
 	model?: string;
+	/** Startup-validated settings captured for this extraction operation. */
+	media?: Readonly<MediaSettings>;
 	/** Custom DNS resolver used for SSRF validation. Primarily a test seam. */
 	lookup?: Lookup;
 }
@@ -213,9 +216,9 @@ async function extractLocalFrames(
 	return { frames, error: frames.length === 0 && firstError ? firstError.error : null };
 }
 
-function safeVideoInfo(url: string): { info: ReturnType<typeof isVideoFile>; error?: string } {
+function safeVideoInfo(url: string, settings: MediaSettings["video"]): { info: ReturnType<typeof isVideoFile>; error?: string } {
 	try {
-		return { info: isVideoFile(url) };
+		return { info: isVideoFile(url, settings) };
 	} catch (err) {
 		return { info: null, error: errorMessage(err) };
 	}
@@ -229,6 +232,7 @@ export async function extractContent(
 	if (signal?.aborted) {
 		return { url, title: "", content: "", error: "Aborted" };
 	}
+	const media = options?.media ?? DEFAULT_MEDIA_SETTINGS;
 
 	if (options?.frames && !options.timestamp) {
 		const frameCount = options.frames;
@@ -249,7 +253,7 @@ export async function extractContent(
 			return buildFrameResult(url, label, timestamps.length, result.frames, result.error, streamInfo.duration);
 		}
 
-		const localVideo = safeVideoInfo(url);
+		const localVideo = safeVideoInfo(url, media.video);
 		if (localVideo.error) {
 			return { url, title: "", content: "", error: localVideo.error };
 		}
@@ -332,7 +336,7 @@ export async function extractContent(
 			return { url, title: `Frame at ${options.timestamp}`, content: `Video frame at ${options.timestamp}`, error: null, thumbnail: frame };
 		}
 
-		const localVideo = safeVideoInfo(url);
+		const localVideo = safeVideoInfo(url, media.video);
 		if (localVideo.error) {
 			return { url, title: "", content: "", error: localVideo.error };
 		}
@@ -364,13 +368,13 @@ export async function extractContent(
 		return { url, title: "", content: "", error: "Timestamp extraction only works with YouTube and local video files" };
 	}
 
-	const localVideo = safeVideoInfo(url);
+	const localVideo = safeVideoInfo(url, media.video);
 	if (localVideo.error) {
 		return { url, title: "", content: "", error: localVideo.error };
 	}
 	if (localVideo.info) {
 		try {
-			const result = await extractVideo(localVideo.info, signal, options);
+			const result = await extractVideo(localVideo.info, signal, options, media.video);
 			if (signal?.aborted) return abortedResult(url);
 			return result ?? { url, title: "", content: "", error: `Video analysis requires Gemini access. Either:\n  1. Sign into gemini.google.com in Chrome (free, uses cookies)\n  2. Set GEMINI_API_KEY in ${WEB_SEARCH_CONFIG_PATH}` };
 		} catch (err) {
@@ -403,13 +407,13 @@ export async function extractContent(
 	const ytInfo = isYouTubeURL(url);
 	let youtubeEnabled = false;
 	try {
-		youtubeEnabled = isYouTubeEnabled();
+		youtubeEnabled = isYouTubeEnabled(media.youtube);
 	} catch (err) {
 		return { url, title: "", content: "", error: errorMessage(err) };
 	}
 	if (ytInfo.isYouTube && youtubeEnabled) {
 		try {
-			const ytResult = await extractYouTube(url, signal, options?.prompt, options?.model);
+			const ytResult = await extractYouTube(url, signal, options?.prompt, options?.model, media.youtube);
 			if (ytResult) return ytResult;
 			if (signal?.aborted) return abortedResult(url);
 		} catch (err) {

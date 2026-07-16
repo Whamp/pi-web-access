@@ -8,7 +8,7 @@ import { clearCloneCache } from "./github-extract.ts";
 import type { ResolvedSearchProvider, SearchProvider, SearchResult, WebSearch } from "./search-provider.ts";
 import { createConfiguredWebSearch } from "./web-search.ts";
 import { formatSeconds, getWebSearchConfigPath } from "./utils.ts";
-import { getWebAccessConfiguration, type WebAccessSettings } from "./configuration.ts";
+import { getWebAccessConfiguration, type MediaSettings, type WebAccessSettings } from "./configuration.ts";
 import {
 	createStoredResultStore,
 	storedResultRetrievalCall,
@@ -51,6 +51,10 @@ function renderSearchErrorPlan(plan: SearchErrorPlan, expanded: boolean, theme: 
 		box.addChild(new Text(theme.fg("muted", plan.expandHint), 0, 0));
 	}
 	return box;
+}
+
+function captureMediaSettings(settings: Readonly<WebAccessSettings>): Readonly<MediaSettings> {
+	return Object.freeze({ youtube: settings.youtube, video: settings.video });
 }
 
 interface ProviderAvailability {
@@ -487,6 +491,7 @@ export default function (pi: ExtensionAPI) {
 		inlineContent: ExtractedContent[],
 		executionSignal: AbortSignal,
 		onUpdate: ((update: { content: Array<{ type: "text"; text: string }>; details: Record<string, unknown> }) => void) | undefined,
+		settings: Readonly<WebAccessSettings>,
 	): Promise<ExtractedContent[]> {
 		const inlineByUrl = new Map<string, ExtractedContent>();
 		for (const item of inlineContent) {
@@ -520,7 +525,10 @@ export default function (pi: ExtensionAPI) {
 			await Promise.all(missing.map(async ([key, url]) => {
 				let item: ExtractedContent | undefined;
 				try {
-					[item] = await fetchAllContent([url], contentSignal, { settings: initConfig });
+					[item] = await fetchAllContent([url], contentSignal, {
+						settings,
+						media: captureMediaSettings(settings),
+					});
 				} catch (error) {
 					if (executionSignal.aborted) throw executionSignal.reason;
 					if (!deadlineSignal.aborted) throw error;
@@ -1281,7 +1289,7 @@ export default function (pi: ExtensionAPI) {
 
 			executionSignal.throwIfAborted();
 			const terminalContent = params.includeContent
-				? await retrieveTerminalContent(allUrls, allInlineContent, executionSignal, onUpdate)
+				? await retrieveTerminalContent(allUrls, allInlineContent, executionSignal, onUpdate, workSettings)
 				: undefined;
 			executionSignal.throwIfAborted();
 			const searchReturn = buildSearchReturn({
@@ -1582,6 +1590,8 @@ export default function (pi: ExtensionAPI) {
 		}),
 
 		async execute(_toolCallId, params, signal, onUpdate) {
+			const workSettings = configuration.current();
+			const media = captureMediaSettings(workSettings);
 			const { urlList, options } = normalizeFetchContentParams(params);
 			if (urlList.length === 0) {
 				return {
@@ -1595,7 +1605,7 @@ export default function (pi: ExtensionAPI) {
 				details: { phase: "fetch", progress: 0 },
 			});
 
-			const fetchResults = await fetchAllContent(urlList, signal, { ...options, settings: initConfig });
+			const fetchResults = await fetchAllContent(urlList, signal, { ...options, settings: workSettings, media });
 			const successful = fetchResults.filter((r) => !r.error).length;
 			const totalChars = fetchResults.reduce((sum, r) => sum + r.content.length, 0);
 
