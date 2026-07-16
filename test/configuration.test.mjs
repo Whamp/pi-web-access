@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { chmod, mkdir, mkdtemp, readFile, readdir, stat, writeFile } from "node:fs/promises";
-import { createRequire, syncBuiltinESMExports } from "node:module";
 import fc from "fast-check";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 
 import { createWebAccessConfiguration, WebAccessConfigurationError } from "../configuration.ts";
+import { failDirectorySync, replaceFsPromiseMethods } from "./fs-faults.mjs";
 
 async function temporaryConfigPath() {
 	const directory = await mkdtemp(join(tmpdir(), "pi-web-access-configuration-"));
@@ -198,25 +198,24 @@ test("failed persistence stages retain the previous target bytes and current obj
 			const configuration = createWebAccessConfiguration({ sourcePath });
 			const previous = configuration.current();
 			const original = prototype[method];
-			const require = createRequire(import.meta.url);
-			const fsPromises = require("node:fs").promises;
-			const originalOpen = fsPromises.open;
-			if (method === "close") {
-				fsPromises.open = async (...arguments_) => {
-					const handle = await originalOpen(...arguments_);
-					const originalClose = handle.close;
-					let failed = false;
-					handle.close = async () => {
-						if (!failed) {
-							failed = true;
-							throw Object.assign(new Error("close failed"), { code: "EIO" });
-						}
-						return originalClose.call(handle);
-					};
-					return handle;
-				};
-				syncBuiltinESMExports();
-			} else {
+			const fsPatch = method === "close"
+				? replaceFsPromiseMethods({
+					open: originalOpen => async (...arguments_) => {
+						const handle = await originalOpen(...arguments_);
+						const originalClose = handle.close;
+						let failed = false;
+						handle.close = async () => {
+							if (!failed) {
+								failed = true;
+								throw Object.assign(new Error("close failed"), { code: "EIO" });
+							}
+							return originalClose.call(handle);
+						};
+						return handle;
+					},
+				})
+				: undefined;
+			if (method !== "close") {
 				prototype[method] = async function () {
 					throw Object.assign(new Error(`${method} failed`), { code: "EIO" });
 				};
@@ -229,8 +228,7 @@ test("failed persistence stages retain the previous target bytes and current obj
 				});
 			} finally {
 				prototype[method] = original;
-				fsPromises.open = originalOpen;
-				syncBuiltinESMExports();
+				fsPatch?.restore();
 			}
 			assert.strictEqual(configuration.current(), previous);
 			assert.equal(await readFile(sourcePath, "utf8"), previousBytes);
@@ -250,43 +248,131 @@ test("a failed parent-directory creation retains the previous current object", a
 	assert.equal(await readFile(blockingPath, "utf8"), "blocking file");
 });
 
-test("a failed parent-directory sync does not swap the current settings", async () => {
+test("a failed parent-directory sync restores the saved file and current settings", async () => {
 	const sourcePath = await temporaryConfigPath();
 	await writeFile(sourcePath, JSON.stringify({ provider: "brave" }));
+	const previousBytes = await readFile(sourcePath, "utf8");
 	const configuration = createWebAccessConfiguration({ sourcePath });
 	const previous = configuration.current();
-	const probe = await import("node:fs/promises").then(({ open }) => open(sourcePath, "r"));
-	const prototype = Object.getPrototypeOf(probe);
-	const originalSync = prototype.sync;
-	await probe.close();
-	prototype.sync = async function () {
-		if ((await this.stat()).isDirectory()) throw Object.assign(new Error("directory sync failed"), { code: "EIO" });
-		return originalSync.call(this);
-	};
+	const restoreDirectorySync = await failDirectorySync(sourcePath);
 	try {
 		await assert.rejects(configuration.update({ provider: "exa" }), /sync its parent directory.*EIO/);
 	} finally {
-		prototype.sync = originalSync;
+		restoreDirectorySync();
 	}
 	assert.strictEqual(configuration.current(), previous);
+	assert.equal(await readFile(sourcePath, "utf8"), previousBytes);
+	assert.deepEqual(await readdir(dirname(sourcePath)), ["web-search.json"]);
+});
+
+test("a failed parent-directory sync removes a newly created configuration file", async () => {
+	const sourcePath = await temporaryConfigPath();
+	const configuration = createWebAccessConfiguration({ sourcePath });
+	const previous = configuration.current();
+	const restoreDirectorySync = await failDirectorySync(dirname(sourcePath));
+	try {
+		await assert.rejects(configuration.update({ provider: "exa" }), /sync its parent directory.*EIO/);
+	} finally {
+		restoreDirectorySync();
+	}
+	assert.strictEqual(configuration.current(), previous);
+	await assert.rejects(readFile(sourcePath, "utf8"), error => error.code === "ENOENT");
+	assert.deepEqual(await readdir(dirname(sourcePath)), []);
+});
+
+test("an already-missing new file counts as a successful rollback", async () => {
+	const sourcePath = await temporaryConfigPath();
+	const configuration = createWebAccessConfiguration({ sourcePath });
+	const previous = configuration.current();
+	const restoreDirectorySync = await failDirectorySync(dirname(sourcePath));
+	const fsPatch = replaceFsPromiseMethods({
+		unlink: originalUnlink => async path => {
+			if (path === sourcePath) {
+				await originalUnlink(path);
+				throw Object.assign(new Error("already absent"), { code: "ENOENT" });
+			}
+			return originalUnlink(path);
+		},
+	});
+	try {
+		await assert.rejects(configuration.update({ provider: "exa" }), /sync its parent directory.*EIO/);
+	} finally {
+		restoreDirectorySync();
+		fsPatch.restore();
+	}
+	assert.strictEqual(configuration.current(), previous);
+	await assert.rejects(readFile(sourcePath, "utf8"), error => error.code === "ENOENT");
+});
+
+test("a failed rollback keeps committed settings aligned and sanitizes an undeletable sidecar", async () => {
+	const sourcePath = await temporaryConfigPath();
+	await writeFile(sourcePath, JSON.stringify({ provider: "brave", geminiApiKey: "credential-value" }));
+	await chmod(sourcePath, 0o400);
+	const configuration = createWebAccessConfiguration({ sourcePath });
+	const restoreDirectorySync = await failDirectorySync(sourcePath);
+	const originalWarn = console.warn;
+	const warnings = [];
+	let renameCount = 0;
+	const fsPatch = replaceFsPromiseMethods({
+		rename: originalRename => async (...arguments_) => {
+			renameCount++;
+			if (renameCount === 2) throw Object.assign(new Error("rollback rename failed"), { code: "EIO" });
+			return originalRename(...arguments_);
+		},
+		unlink: originalUnlink => async path => {
+			if (String(path).endsWith(".rollback")) throw Object.assign(new Error("rollback deletion failed"), { code: "EACCES" });
+			return originalUnlink(path);
+		},
+	});
+	const { fsPromises } = fsPatch;
+	console.warn = (...arguments_) => warnings.push(arguments_);
+	try {
+		await configuration.update({ provider: "exa" });
+	} finally {
+		restoreDirectorySync();
+		fsPatch.restore();
+		console.warn = originalWarn;
+	}
+	assert.equal(configuration.current().provider, "exa");
+	assert.equal(JSON.parse(await readFile(sourcePath, "utf8")).provider, "exa");
+	const entries = await readdir(dirname(sourcePath));
+	const rollbackName = entries.find(name => name.endsWith(".rollback"));
+	assert.ok(rollbackName);
+	const rollbackPath = join(dirname(sourcePath), rollbackName);
+	assert.equal(await readFile(rollbackPath, "utf8"), "");
+	assert.equal((await stat(rollbackPath)).mode & 0o777, 0o600);
+	assert.ok(warnings.some(([, context]) => context?.rollbackPath === rollbackPath));
+	await fsPromises.unlink(rollbackPath);
+	assert.deepEqual(await readdir(dirname(sourcePath)), ["web-search.json"]);
+});
+
+test("a successful save leaves no rollback file when deletion is unavailable", async () => {
+	const sourcePath = await temporaryConfigPath();
+	await writeFile(sourcePath, JSON.stringify({ provider: "brave", geminiApiKey: "credential-value" }));
+	const configuration = createWebAccessConfiguration({ sourcePath });
+	const fsPatch = replaceFsPromiseMethods({
+		unlink: () => async () => {
+			throw Object.assign(new Error("unlink unavailable"), { code: "EACCES" });
+		},
+	});
+	try {
+		await configuration.update({ provider: "exa" });
+	} finally {
+		fsPatch.restore();
+	}
+	assert.equal(configuration.current().provider, "exa");
+	assert.deepEqual(await readdir(dirname(sourcePath)), ["web-search.json"]);
 });
 
 test("an unsupported parent-directory sync still completes the saved runtime update", async () => {
 	const sourcePath = await temporaryConfigPath();
 	await writeFile(sourcePath, JSON.stringify({ provider: "brave" }));
 	const configuration = createWebAccessConfiguration({ sourcePath });
-	const probe = await import("node:fs/promises").then(({ open }) => open(sourcePath, "r"));
-	const prototype = Object.getPrototypeOf(probe);
-	const originalSync = prototype.sync;
-	await probe.close();
-	prototype.sync = async function () {
-		if ((await this.stat()).isDirectory()) throw Object.assign(new Error("unsupported"), { code: "EINVAL" });
-		return originalSync.call(this);
-	};
+	const restoreDirectorySync = await failDirectorySync(sourcePath, { code: "EINVAL", once: false });
 	try {
 		await configuration.update({ provider: "exa" });
 	} finally {
-		prototype.sync = originalSync;
+		restoreDirectorySync();
 	}
 	assert.equal(configuration.current().provider, "exa");
 	assert.equal(JSON.parse(await readFile(sourcePath, "utf8")).provider, "exa");

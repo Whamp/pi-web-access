@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdir, open, rename, stat, unlink } from "node:fs/promises";
+import { mkdir, open, readFile, rename, stat, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { WebAccessConfigurationError } from "./errors.ts";
@@ -258,6 +258,75 @@ function isUnsupportedDirectorySync(error: unknown): boolean {
 	return error.code === "EINVAL" || error.code === "ENOTSUP" || error.code === "EISDIR" || error.code === "EBADF";
 }
 
+type RollbackOutcome = "restored" | "committed";
+
+async function removeOrSanitizeRollbackFile(rollbackPath: string, sourcePath: string): Promise<void> {
+	try {
+		await unlink(rollbackPath);
+		return;
+	} catch (error) {
+		if (isMissingFileError(error)) {
+			return;
+		}
+	}
+
+	let handle: Awaited<ReturnType<typeof open>> | undefined;
+	try {
+		handle = await open(rollbackPath, "r+");
+		await handle.truncate(0);
+		await handle.chmod(0o600);
+		await handle.sync();
+		await handle.close();
+		handle = undefined;
+		logWarn("Unable to remove sanitized Web Access configuration rollback file", { sourcePath, rollbackPath });
+	} catch {
+		logWarn("Unable to remove or sanitize Web Access configuration rollback file", { sourcePath, rollbackPath });
+	} finally {
+		await handle?.close().catch(() => {});
+	}
+}
+
+async function restorePreviousConfiguration(options: {
+	readonly sourcePath: string;
+	readonly rollbackPath: string;
+	readonly previousBytes?: Buffer;
+	readonly mode: number;
+}): Promise<RollbackOutcome> {
+	let rollbackHandle: Awaited<ReturnType<typeof open>> | undefined;
+	try {
+		if (options.previousBytes !== undefined) {
+			rollbackHandle = await open(options.rollbackPath, "wx", 0o600);
+			await rollbackHandle.chmod(0o600);
+			await rollbackHandle.writeFile(options.previousBytes);
+			await rollbackHandle.sync();
+			await rename(options.rollbackPath, options.sourcePath);
+			try {
+				await rollbackHandle.chmod(options.mode);
+				await rollbackHandle.sync();
+			} catch {
+				logWarn("Unable to restore Web Access configuration permissions after rollback", {
+					sourcePath: options.sourcePath,
+					mode: options.mode,
+				});
+			}
+			await rollbackHandle.close().catch(() => {
+				logWarn("Unable to close restored Web Access configuration after rollback", { sourcePath: options.sourcePath });
+			});
+			rollbackHandle = undefined;
+		} else {
+			await unlink(options.sourcePath);
+		}
+		return "restored";
+	} catch (error) {
+		if (options.previousBytes === undefined && isMissingFileError(error)) {
+			return "restored";
+		}
+		await rollbackHandle?.close().catch(() => {});
+		await removeOrSanitizeRollbackFile(options.rollbackPath, options.sourcePath);
+		return "committed";
+	}
+}
+
 let productionConfiguration: WebAccessConfiguration | undefined;
 
 /**
@@ -310,18 +379,29 @@ export function createWebAccessConfiguration(options: WebAccessConfigurationOpti
 		const nextSettings = normalize(nextRaw, sourcePath);
 		const serialized = `${JSON.stringify(nextRaw, null, 2)}\n`;
 		const parent = dirname(sourcePath);
-		const temporaryPath = join(parent, `.${basename(sourcePath)}.${randomUUID()}.tmp`);
+		const uniqueName = `${basename(sourcePath)}.${randomUUID()}`;
+		const temporaryPath = join(parent, `.${uniqueName}.tmp`);
+		const rollbackPath = join(parent, `.${uniqueName}.rollback`);
 		let stage = "create its parent directory";
 		let handle: Awaited<ReturnType<typeof open>> | undefined;
 		let directoryHandle: Awaited<ReturnType<typeof open>> | undefined;
+		let previousBytes: Buffer | undefined;
+		let mode = 0o600;
+		let replacementCommitted = false;
 		try {
 			await mkdir(parent, { recursive: true });
-			let mode = 0o600;
 			stage = "inspect existing file permissions";
 			try {
-				mode = (await stat(sourcePath)).mode & 0o777;
+				const sourceStat = await stat(sourcePath);
+				if (sourceStat.isFile()) {
+					mode = sourceStat.mode & 0o777;
+					stage = "read its previous contents for rollback";
+					previousBytes = await readFile(sourcePath);
+				}
 			} catch (error) {
-				if (!isMissingFileError(error)) throw error;
+				if (!isMissingFileError(error)) {
+					throw error;
+				}
 			}
 			stage = "write its temporary file";
 			handle = await open(temporaryPath, "wx", mode);
@@ -333,28 +413,54 @@ export function createWebAccessConfiguration(options: WebAccessConfigurationOpti
 			stage = "close its temporary file";
 			await handle.close();
 			handle = undefined;
-			stage = "atomically replace the configuration file";
-			await rename(temporaryPath, sourcePath);
 			stage = "open its parent directory for durability";
 			directoryHandle = await open(parent, "r");
+			stage = "atomically replace the configuration file";
+			await rename(temporaryPath, sourcePath);
+			replacementCommitted = true;
 			stage = "sync its parent directory for durability";
 			try {
 				await directoryHandle.sync();
 			} catch (error) {
-				if (!isUnsupportedDirectorySync(error)) throw error;
+				if (!isUnsupportedDirectorySync(error)) {
+					throw error;
+				}
 			}
-			stage = "close its parent directory after durability";
-			await directoryHandle.close();
-			directoryHandle = undefined;
 		} catch (error) {
+			let restoredPreviousValue = !replacementCommitted;
+			if (replacementCommitted) {
+				const rollbackOutcome = await restorePreviousConfiguration({ sourcePath, rollbackPath, previousBytes, mode });
+				restoredPreviousValue = rollbackOutcome === "restored";
+				if (restoredPreviousValue) {
+					try {
+						await directoryHandle?.sync();
+					} catch (rollbackSyncError) {
+						if (!isUnsupportedDirectorySync(rollbackSyncError)) {
+							logWarn("Unable to confirm Web Access configuration rollback durability", { sourcePath });
+						}
+					}
+				} else {
+					// The rename already committed. If rollback also fails, keep runtime and disk aligned
+					// and report the durability failure as a warning instead of rejecting a committed update.
+					raw = nextRaw;
+					settings = nextSettings;
+					logWarn("Unable to roll back Web Access configuration; keeping saved settings current", { sourcePath });
+				}
+			}
 			await handle?.close().catch(() => {});
 			await directoryHandle?.close().catch(() => {});
 			await unlink(temporaryPath).catch(() => {});
+			if (!restoredPreviousValue) {
+				return;
+			}
 			const cause = error instanceof Error && "code" in error && typeof error.code === "string" ? ` (${error.code})` : "";
 			throw new Error(`Unable to save Web Access configuration at ${sourcePath}: failed to ${stage}${cause}; previous settings remain active.`);
 		}
 		raw = nextRaw;
 		settings = nextSettings;
+		await directoryHandle?.close().catch(() => {
+			logWarn("Unable to close Web Access configuration directory after a successful save", { sourcePath });
+		});
 	}
 
 	let updateQueue = Promise.resolve();
