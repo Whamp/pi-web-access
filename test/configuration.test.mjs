@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { chmod, mkdir, mkdtemp, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { createRequire, syncBuiltinESMExports } from "node:module";
 import fc from "fast-check";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -177,6 +178,120 @@ test("a failed write keeps the saved file and current settings unchanged without
 	assert.equal(await readFile(sourcePath, "utf8"), previousFile);
 });
 
+test("failed persistence stages retain the previous target bytes and current object", async (context) => {
+	const probePath = await temporaryConfigPath();
+	await writeFile(probePath, "{}");
+	const probe = await import("node:fs/promises").then(({ open }) => open(probePath, "r"));
+	const prototype = Object.getPrototypeOf(probe);
+	await probe.close();
+
+	for (const [method, stage] of [
+		["writeFile", "write its temporary file"],
+		["sync", "sync its temporary file"],
+		["chmod", "set its file permissions"],
+		["close", "close its temporary file"],
+	]) {
+		await context.test(`rollback after ${method} failure`, async () => {
+			const sourcePath = await temporaryConfigPath();
+			await writeFile(sourcePath, JSON.stringify({ provider: "brave", geminiApiKey: "never-report-this" }));
+			const previousBytes = await readFile(sourcePath, "utf8");
+			const configuration = createWebAccessConfiguration({ sourcePath });
+			const previous = configuration.current();
+			const original = prototype[method];
+			const require = createRequire(import.meta.url);
+			const fsPromises = require("node:fs").promises;
+			const originalOpen = fsPromises.open;
+			if (method === "close") {
+				fsPromises.open = async (...arguments_) => {
+					const handle = await originalOpen(...arguments_);
+					const originalClose = handle.close;
+					let failed = false;
+					handle.close = async () => {
+						if (!failed) {
+							failed = true;
+							throw Object.assign(new Error("close failed"), { code: "EIO" });
+						}
+						return originalClose.call(handle);
+					};
+					return handle;
+				};
+				syncBuiltinESMExports();
+			} else {
+				prototype[method] = async function () {
+					throw Object.assign(new Error(`${method} failed`), { code: "EIO" });
+				};
+			}
+			try {
+				await assert.rejects(configuration.update({ provider: "exa" }), error => {
+					assert.match(error.message, new RegExp(stage));
+					assert.doesNotMatch(error.message, /never-report-this/);
+					return true;
+				});
+			} finally {
+				prototype[method] = original;
+				fsPromises.open = originalOpen;
+				syncBuiltinESMExports();
+			}
+			assert.strictEqual(configuration.current(), previous);
+			assert.equal(await readFile(sourcePath, "utf8"), previousBytes);
+		});
+	}
+});
+
+test("a failed parent-directory creation retains the previous current object", async () => {
+	const directory = await mkdtemp(join(tmpdir(), "pi-web-access-mkdir-failure-"));
+	const blockingPath = join(directory, "not-a-directory");
+	await writeFile(blockingPath, "blocking file");
+	const sourcePath = join(blockingPath, "nested", "web-search.json");
+	const configuration = createWebAccessConfiguration({ sourcePath });
+	const previous = configuration.current();
+	await assert.rejects(configuration.update({ provider: "exa" }), /create its parent directory/);
+	assert.strictEqual(configuration.current(), previous);
+	assert.equal(await readFile(blockingPath, "utf8"), "blocking file");
+});
+
+test("a failed parent-directory sync does not swap the current settings", async () => {
+	const sourcePath = await temporaryConfigPath();
+	await writeFile(sourcePath, JSON.stringify({ provider: "brave" }));
+	const configuration = createWebAccessConfiguration({ sourcePath });
+	const previous = configuration.current();
+	const probe = await import("node:fs/promises").then(({ open }) => open(sourcePath, "r"));
+	const prototype = Object.getPrototypeOf(probe);
+	const originalSync = prototype.sync;
+	await probe.close();
+	prototype.sync = async function () {
+		if ((await this.stat()).isDirectory()) throw Object.assign(new Error("directory sync failed"), { code: "EIO" });
+		return originalSync.call(this);
+	};
+	try {
+		await assert.rejects(configuration.update({ provider: "exa" }), /sync its parent directory.*EIO/);
+	} finally {
+		prototype.sync = originalSync;
+	}
+	assert.strictEqual(configuration.current(), previous);
+});
+
+test("an unsupported parent-directory sync still completes the saved runtime update", async () => {
+	const sourcePath = await temporaryConfigPath();
+	await writeFile(sourcePath, JSON.stringify({ provider: "brave" }));
+	const configuration = createWebAccessConfiguration({ sourcePath });
+	const probe = await import("node:fs/promises").then(({ open }) => open(sourcePath, "r"));
+	const prototype = Object.getPrototypeOf(probe);
+	const originalSync = prototype.sync;
+	await probe.close();
+	prototype.sync = async function () {
+		if ((await this.stat()).isDirectory()) throw Object.assign(new Error("unsupported"), { code: "EINVAL" });
+		return originalSync.call(this);
+	};
+	try {
+		await configuration.update({ provider: "exa" });
+	} finally {
+		prototype.sync = originalSync;
+	}
+	assert.equal(configuration.current().provider, "exa");
+	assert.equal(JSON.parse(await readFile(sourcePath, "utf8")).provider, "exa");
+});
+
 test("a failed atomic replacement leaves the prior current settings and target intact", async () => {
 	const directory = await mkdtemp(join(tmpdir(), "pi-web-access-replacement-"));
 	const sourcePath = join(directory, "web-search.json");
@@ -190,76 +305,173 @@ test("a failed atomic replacement leaves the prior current settings and target i
 	assert.deepEqual(await readdir(directory), ["web-search.json"]);
 });
 
-test("generated unknown fields survive a supported provider update", async () => {
-	const knownTopLevel = new Set([
-		"provider", "searchProvider", "webSearch", "allowBrowserCookies", "workflow", "curatorTimeoutSeconds",
-		"githubClone", "youtube", "video", "shortcuts", "ssrf", "openaiApiKey", "braveApiKey", "exaApiKey",
-		"parallelApiKey", "tavilyApiKey", "perplexityApiKey", "geminiApiKey", "geminiBaseUrl", "cloudflareApiKey",
-		"chromeProfile", "searchModel", "summaryModel",
-	]);
-	await fc.assert(fc.asyncProperty(
-		fc.dictionary(fc.string({ minLength: 1 }).filter(key => !knownTopLevel.has(key)), fc.jsonValue()),
-		fc.dictionary(fc.string({ minLength: 1 }).filter(key => !["maxSizeMB", "enabled", "preferredModel"].includes(key)), fc.jsonValue()),
-		async (unknownTopLevel, unknownVideo) => {
-			const sourcePath = await temporaryConfigPath();
-			const raw = { ...unknownTopLevel, provider: "brave", video: { ...unknownVideo, maxSizeMB: 31 } };
-			const persistedRaw = JSON.parse(JSON.stringify(raw));
-			await writeFile(sourcePath, JSON.stringify(raw));
-			const configuration = createWebAccessConfiguration({ sourcePath, warn: () => {} });
-			await configuration.update({ provider: "exa" });
-			assert.deepEqual(JSON.parse(await readFile(sourcePath, "utf8")), { ...persistedRaw, provider: "exa" });
-		}
-	), { numRuns: 40 });
+const providers = ["auto", "openai", "brave", "parallel", "tavily", "exa", "perplexity", "gemini"];
+const workflows = ["none", "auto-summary", "summary-review"];
+const knownTopLevel = new Set([
+	"provider", "searchProvider", "webSearch", "allowBrowserCookies", "workflow", "curatorTimeoutSeconds",
+	"githubClone", "youtube", "video", "shortcuts", "ssrf", "openaiApiKey", "braveApiKey", "exaApiKey",
+	"parallelApiKey", "tavilyApiKey", "perplexityApiKey", "geminiApiKey", "geminiBaseUrl", "cloudflareApiKey",
+	"chromeProfile", "searchModel", "summaryModel",
+]);
+const nestedKnown = {
+	webSearch: new Set(["enabled"]),
+	githubClone: new Set(["enabled", "maxRepoSizeMB", "cloneTimeoutSeconds", "clonePath"]),
+	youtube: new Set(["enabled", "preferredModel"]),
+	video: new Set(["enabled", "preferredModel", "maxSizeMB"]),
+	shortcuts: new Set(["curate", "activity"]),
+	ssrf: new Set(["allowRanges"]),
+};
+const nonEmptyString = fc.string({ minLength: 1 }).filter(value => value.trim().length > 0);
+const unknownKey = fc.stringMatching(/^[a-z][a-zA-Z0-9]{0,12}$/);
+const unknownObject = known => fc.dictionary(unknownKey.filter(key => !known.has(key)), fc.jsonValue(), { maxKeys: 4 });
+const validKnownSettings = fc.record({
+	provider: fc.constantFrom(...providers),
+	searchProvider: fc.constantFrom(...providers),
+	webSearch: fc.record({ enabled: fc.boolean() }),
+	allowBrowserCookies: fc.boolean(),
+	workflow: fc.constantFrom(...workflows),
+	curatorTimeoutSeconds: fc.integer({ min: 1, max: 600 }),
+	githubClone: fc.record({
+		enabled: fc.boolean(),
+		maxRepoSizeMB: fc.integer({ min: 1, max: 10000 }),
+		cloneTimeoutSeconds: fc.integer({ min: 1, max: 10000 }),
+		clonePath: nonEmptyString,
+	}),
+	youtube: fc.record({ enabled: fc.boolean(), preferredModel: nonEmptyString }),
+	video: fc.record({ enabled: fc.boolean(), preferredModel: nonEmptyString, maxSizeMB: fc.integer({ min: 1, max: 10000 }) }),
+	shortcuts: fc.record({ curate: nonEmptyString, activity: nonEmptyString }),
+	ssrf: fc.record({ allowRanges: fc.constantFrom([], ["198.18.0.0/15"], ["fd00::/8"], ["198.18.0.0/15", "fd00::/8"]) }),
+	openaiApiKey: nonEmptyString,
+	braveApiKey: nonEmptyString,
+	exaApiKey: nonEmptyString,
+	parallelApiKey: nonEmptyString,
+	tavilyApiKey: nonEmptyString,
+	perplexityApiKey: nonEmptyString,
+	geminiApiKey: nonEmptyString,
+	geminiBaseUrl: nonEmptyString,
+	cloudflareApiKey: nonEmptyString,
+	chromeProfile: nonEmptyString,
+	searchModel: nonEmptyString,
+	summaryModel: nonEmptyString,
+});
+const completeValidSettings = fc.tuple(
+	validKnownSettings,
+	unknownObject(knownTopLevel),
+	...Object.values(nestedKnown).map(unknownObject),
+).map(([known, unknownTop, ...unknownNested]) => {
+	const raw = { ...unknownTop, ...known };
+	for (const [index, parent] of Object.keys(nestedKnown).entries()) {
+		raw[parent] = { ...unknownNested[index], ...known[parent] };
+	}
+	return raw;
 });
 
-test("generated valid settings normalize to a stable current value", async () => {
-	await fc.assert(fc.asyncProperty(
-		fc.record({
-			provider: fc.constantFrom("auto", "openai", "brave", "parallel", "tavily", "exa", "perplexity", "gemini"),
-			enabled: fc.boolean(),
-			timeout: fc.integer({ min: 1, max: 600 }),
-			maxSize: fc.integer({ min: 1, max: 10000 }),
-			model: fc.string({ minLength: 1 }).filter(value => value.trim().length > 0),
-		}),
-		async ({ provider, enabled, timeout, maxSize, model }) => {
-			const sourcePath = await temporaryConfigPath();
-			await writeFile(sourcePath, JSON.stringify({ provider, webSearch: { enabled }, curatorTimeoutSeconds: timeout, video: { maxSizeMB: maxSize, preferredModel: model } }));
-			const first = createWebAccessConfiguration({ sourcePath }).current();
-			const second = createWebAccessConfiguration({ sourcePath }).current();
-			assert.deepEqual(second, first);
-			assert.ok(Object.isFrozen(first) && Object.isFrozen(first.video));
-		}
-	), { numRuns: 40 });
+test("generated complete settings preserve every unrelated known and unknown field through update", async () => {
+	await fc.assert(fc.asyncProperty(completeValidSettings, async raw => {
+		const sourcePath = await temporaryConfigPath();
+		const persistedRaw = JSON.parse(JSON.stringify(raw));
+		await writeFile(sourcePath, JSON.stringify(raw));
+		const warnings = [];
+		const configuration = createWebAccessConfiguration({ sourcePath, warn: message => warnings.push(message) });
+		const inFlight = configuration.current();
+		await configuration.update({ provider: "exa" });
+		assert.strictEqual(inFlight.provider, raw.provider);
+		assert.deepEqual(JSON.parse(await readFile(sourcePath, "utf8")), { ...persistedRaw, provider: "exa" });
+		assert.ok(warnings.length <= 1);
+	}), { numRuns: 60 });
 });
 
-test("generated invalid known values only produce key-specific configuration errors", async () => {
-	const cases = [
-		{ key: "provider", raw: { provider: "invalid" } },
-		{ key: "searchProvider", raw: { searchProvider: false } },
-		...(["openaiApiKey", "braveApiKey", "exaApiKey", "parallelApiKey", "tavilyApiKey", "perplexityApiKey", "geminiApiKey", "geminiBaseUrl", "cloudflareApiKey", "chromeProfile", "searchModel", "summaryModel"]
-			.map(key => ({ key, raw: { [key]: " " } }))),
-		{ key: "webSearch.enabled", raw: { webSearch: { enabled: 1 } } },
-		{ key: "allowBrowserCookies", raw: { allowBrowserCookies: "yes" } },
-		{ key: "workflow", raw: { workflow: "curator" } },
-		{ key: "curatorTimeoutSeconds", raw: { curatorTimeoutSeconds: 0 } },
-		{ key: "githubClone.enabled", raw: { githubClone: { enabled: null } } },
-		{ key: "githubClone.maxRepoSizeMB", raw: { githubClone: { maxRepoSizeMB: -1 } } },
-		{ key: "githubClone.cloneTimeoutSeconds", raw: { githubClone: { cloneTimeoutSeconds: null } } },
-		{ key: "githubClone.clonePath", raw: { githubClone: { clonePath: "" } } },
-		{ key: "youtube.enabled", raw: { youtube: { enabled: "yes" } } },
-		{ key: "youtube.preferredModel", raw: { youtube: { preferredModel: "" } } },
-		{ key: "video.enabled", raw: { video: { enabled: 1 } } },
-		{ key: "video.preferredModel", raw: { video: { preferredModel: null } } },
-		{ key: "video.maxSizeMB", raw: { video: { maxSizeMB: Number.POSITIVE_INFINITY } } },
-		{ key: "shortcuts.curate", raw: { shortcuts: { curate: "" } } },
-		{ key: "shortcuts.activity", raw: { shortcuts: { activity: false } } },
-		{ key: "ssrf.allowRanges", raw: { ssrf: { allowRanges: ["bad-range"] } } },
-	];
-	await fc.assert(fc.asyncProperty(fc.constantFrom(...cases), async ({ key, raw }) => {
+test("generated complete valid settings normalize to a stable immutable current value", async () => {
+	await fc.assert(fc.asyncProperty(completeValidSettings, async raw => {
 		const sourcePath = await temporaryConfigPath();
 		await writeFile(sourcePath, JSON.stringify(raw));
-		assert.throws(() => createWebAccessConfiguration({ sourcePath }), error => error instanceof WebAccessConfigurationError && error.key === key);
-	}), { numRuns: cases.length * 3 });
+		const first = createWebAccessConfiguration({ sourcePath, warn: () => {} }).current();
+		const second = createWebAccessConfiguration({ sourcePath, warn: () => {} }).current();
+		assert.deepEqual(second, first);
+		assert.ok(Object.isFrozen(first) && Object.isFrozen(first.githubClone) && Object.isFrozen(first.ssrf.allowRanges));
+	}), { numRuns: 60 });
+});
+
+test("generated unknown values at every object level are warned by key and never by value", async () => {
+	await fc.assert(fc.asyncProperty(fc.uuid(), async token => {
+		const sourcePath = await temporaryConfigPath();
+		const secrets = Object.keys(nestedKnown).map((parent, index) => `${token}-${parent}-${index}`);
+		const raw = { futureTop: `${token}-top` };
+		for (const [index, parent] of Object.keys(nestedKnown).entries()) raw[parent] = { [`future${index}`]: secrets[index] };
+		await writeFile(sourcePath, JSON.stringify(raw));
+		const warnings = [];
+		const configuration = createWebAccessConfiguration({ sourcePath, warn: message => warnings.push(message) });
+		await configuration.update({ provider: "brave" });
+		assert.equal(warnings.length, 1);
+		assert.match(warnings[0], /futureTop/);
+		assert.doesNotMatch(warnings[0], new RegExp(token));
+		assert.deepEqual(JSON.parse(await readFile(sourcePath, "utf8")), { ...raw, provider: "brave" });
+	}), { numRuns: 30 });
+});
+
+const invalidString = fc.oneof(fc.constant(""), fc.stringMatching(/^\s+$/), fc.integer(), fc.boolean(), fc.constant(null), fc.array(fc.jsonValue()), fc.dictionary(unknownKey, fc.jsonValue()));
+const invalidBoolean = fc.oneof(fc.string(), fc.integer(), fc.constant(null), fc.array(fc.jsonValue()), fc.dictionary(unknownKey, fc.jsonValue()));
+const invalidPositiveNumber = fc.oneof(fc.integer({ max: 0 }), fc.string(), fc.boolean(), fc.constant(null), fc.array(fc.jsonValue()), fc.dictionary(unknownKey, fc.jsonValue()));
+const invalidProvider = fc.oneof(
+	invalidString,
+	fc.string().filter(value => value.trim().length > 0 && !providers.includes(value.trim().toLowerCase())),
+);
+const invalidWorkflow = fc.oneof(
+	invalidString,
+	fc.string().filter(value => value.trim().length > 0 && !workflows.includes(value.trim().toLowerCase())),
+);
+const invalidObject = fc.oneof(fc.string(), fc.integer(), fc.boolean(), fc.constant(null), fc.array(fc.jsonValue()));
+const invalidFieldArbitraries = [
+	["provider", invalidProvider.map(value => ({ provider: value }))],
+	["searchProvider", invalidProvider.map(value => ({ searchProvider: value }))],
+	["webSearch", invalidObject.map(value => ({ webSearch: value }))],
+	["webSearch.enabled", invalidBoolean.map(value => ({ webSearch: { enabled: value } }))],
+	["allowBrowserCookies", invalidBoolean.map(value => ({ allowBrowserCookies: value }))],
+	["workflow", invalidWorkflow.map(value => ({ workflow: value }))],
+	["curatorTimeoutSeconds", fc.oneof(invalidPositiveNumber, fc.integer({ min: 601 })).map(value => ({ curatorTimeoutSeconds: value }))],
+	["githubClone", invalidObject.map(value => ({ githubClone: value }))],
+	["githubClone.enabled", invalidBoolean.map(value => ({ githubClone: { enabled: value } }))],
+	["githubClone.maxRepoSizeMB", invalidPositiveNumber.map(value => ({ githubClone: { maxRepoSizeMB: value } }))],
+	["githubClone.cloneTimeoutSeconds", invalidPositiveNumber.map(value => ({ githubClone: { cloneTimeoutSeconds: value } }))],
+	["githubClone.clonePath", invalidString.map(value => ({ githubClone: { clonePath: value } }))],
+	["youtube", invalidObject.map(value => ({ youtube: value }))],
+	["youtube.enabled", invalidBoolean.map(value => ({ youtube: { enabled: value } }))],
+	["youtube.preferredModel", invalidString.map(value => ({ youtube: { preferredModel: value } }))],
+	["video", invalidObject.map(value => ({ video: value }))],
+	["video.enabled", invalidBoolean.map(value => ({ video: { enabled: value } }))],
+	["video.preferredModel", invalidString.map(value => ({ video: { preferredModel: value } }))],
+	["video.maxSizeMB", invalidPositiveNumber.map(value => ({ video: { maxSizeMB: value } }))],
+	["shortcuts", invalidObject.map(value => ({ shortcuts: value }))],
+	["shortcuts.curate", invalidString.map(value => ({ shortcuts: { curate: value } }))],
+	["shortcuts.activity", invalidString.map(value => ({ shortcuts: { activity: value } }))],
+	["ssrf", invalidObject.map(value => ({ ssrf: value }))],
+	["ssrf.allowRanges", fc.oneof(
+		fc.string(),
+		fc.integer(),
+		fc.boolean(),
+		fc.constant(null),
+		fc.dictionary(unknownKey, fc.jsonValue()),
+		fc.array(fc.constant("not-a-cidr"), { minLength: 1 }),
+	).map(value => ({ ssrf: { allowRanges: value } }))],
+	...(["openaiApiKey", "braveApiKey", "exaApiKey", "parallelApiKey", "tavilyApiKey", "perplexityApiKey", "geminiApiKey", "geminiBaseUrl", "cloudflareApiKey", "chromeProfile", "searchModel", "summaryModel"]
+		.map(key => [key, invalidString.map(value => ({ [key]: value }))])),
+];
+const invalidKnownSetting = fc.oneof(...invalidFieldArbitraries.map(([key, arbitrary]) => arbitrary.map(raw => ({ key, raw }))));
+
+test("arbitrary invalid values for every known field produce deterministic configuration errors", async () => {
+	await fc.assert(fc.asyncProperty(invalidKnownSetting, async ({ key, raw }) => {
+		const sourcePath = await temporaryConfigPath();
+		await writeFile(sourcePath, JSON.stringify(raw));
+		let first;
+		let second;
+		try { createWebAccessConfiguration({ sourcePath }); } catch (error) { first = error; }
+		try { createWebAccessConfiguration({ sourcePath }); } catch (error) { second = error; }
+		assert.ok(first instanceof WebAccessConfigurationError);
+		assert.ok(second instanceof WebAccessConfigurationError);
+		assert.equal(first.key, key);
+		assert.equal(second.key, key);
+		assert.equal(second.message, first.message);
+	}), { numRuns: invalidFieldArbitraries.length * 8 });
 });
 
 test("configuration path precedence is agent dir, XDG pi dir, then default Pi dir", () => {

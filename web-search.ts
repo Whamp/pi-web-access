@@ -1,7 +1,7 @@
 import { settleWithAbort } from "./abort.ts";
 import { createBraveSearchProvider } from "./brave.ts";
 import { createExaSearchProvider } from "./exa.ts";
-import { geminiSearchProvider } from "./gemini-search.ts";
+import { createGeminiSearchProvider } from "./gemini-search.ts";
 import { createOpenAISearchProvider } from "./openai-search.ts";
 import { createParallelSearchProvider } from "./parallel.ts";
 import { createPerplexitySearchProvider } from "./perplexity.ts";
@@ -102,7 +102,7 @@ export function createWebSearch(providers: SearchProviders): WebSearch {
 				let eligibility: ProviderEligibility;
 				try {
 					eligibility = await settleWithAbort(
-						() => selected.eligibility({ extensionContext: options.extensionContext, signal: options.signal }),
+						async () => selected.eligibility({ extensionContext: options.extensionContext, signal: options.signal }),
 						options.signal,
 					);
 				} catch (error) {
@@ -132,7 +132,7 @@ export function createWebSearch(providers: SearchProviders): WebSearch {
 				let eligibility: ProviderEligibility;
 				try {
 					eligibility = await settleWithAbort(
-						() => candidate.eligibility({ extensionContext: options.extensionContext, signal: options.signal }),
+						async () => candidate.eligibility({ extensionContext: options.extensionContext, signal: options.signal }),
 						options.signal,
 					);
 				} catch (error) {
@@ -163,6 +163,7 @@ export function createWebSearch(providers: SearchProviders): WebSearch {
 	};
 }
 
+/** Creates Web search adapters that all capture the supplied immutable settings value. */
 export function createConfiguredWebSearch(settings: Readonly<WebAccessSettings>): WebSearch {
 	return createWebSearch({
 		openai: createOpenAISearchProvider(settings),
@@ -171,6 +172,6 @@ export function createConfiguredWebSearch(settings: Readonly<WebAccessSettings>)
 		parallel: createParallelSearchProvider(settings),
 		tavily: createTavilySearchProvider(settings),
 		perplexity: createPerplexitySearchProvider(settings),
-		gemini: geminiSearchProvider,
+		gemini: createGeminiSearchProvider(settings),
 	});
 }

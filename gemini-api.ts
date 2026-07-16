@@ -1,4 +1,4 @@
-import { getWebAccessConfiguration } from "./configuration.ts";
+import { getWebAccessConfiguration, type WebAccessSettings } from "./configuration.ts";
 import { fetchOwnedResponse, readResponseText } from "./response-body.ts";
 
 const DEFAULT_API_HOST = "https://generativelanguage.googleapis.com";
@@ -23,49 +23,64 @@ function normalizeBaseUrl(value: unknown): string | null {
 	return normalized.length > 0 ? normalized : null;
 }
 
-function isCloudflareGateway(): boolean {
-	return getApiHost().includes("gateway.ai.cloudflare.com");
+type GeminiApiSettings = Pick<WebAccessSettings, "geminiApiKey" | "geminiBaseUrl" | "cloudflareApiKey">;
+
+function currentSettings(settings?: GeminiApiSettings): GeminiApiSettings {
+	return settings ?? getWebAccessConfiguration().current();
 }
 
-export function getApiKey(): string | null {
-	return normalizeApiKey(process.env.GEMINI_API_KEY) ?? normalizeApiKey(getWebAccessConfiguration().current().geminiApiKey);
+function isCloudflareGateway(settings?: GeminiApiSettings): boolean {
+	return getApiHost(settings).includes("gateway.ai.cloudflare.com");
 }
 
-export function getApiHost(): string {
+/** Resolves the Gemini API key, preserving environment-variable precedence. */
+export function getApiKey(settings?: GeminiApiSettings): string | null {
+	return normalizeApiKey(process.env.GEMINI_API_KEY) ?? normalizeApiKey(currentSettings(settings).geminiApiKey);
+}
+
+/** Resolves the configured Gemini API host without its API version suffix. */
+export function getApiHost(settings?: GeminiApiSettings): string {
 	return (
 		normalizeBaseUrl(process.env.GOOGLE_GEMINI_BASE_URL) ??
-		normalizeBaseUrl(getWebAccessConfiguration().current().geminiBaseUrl) ??
+		normalizeBaseUrl(currentSettings(settings).geminiBaseUrl) ??
 		DEFAULT_API_HOST
 	);
 }
 
-export function getVersionedApiBase(): string {
-	return `${getApiHost()}/${API_VERSION}`;
+/** Resolves the versioned Gemini generate-content API base URL. */
+export function getVersionedApiBase(settings?: GeminiApiSettings): string {
+	return `${getApiHost(settings)}/${API_VERSION}`;
 }
 
-export function buildKeyParam(apiKey: string | null): string {
-	if (!apiKey || isCloudflareGateway()) return "";
+/** Builds direct-Google key authentication, omitting it for gateways. */
+export function buildKeyParam(apiKey: string | null, settings?: GeminiApiSettings): string {
+	if (!apiKey || isCloudflareGateway(settings)) return "";
 	return `?key=${apiKey}`;
 }
 
-export function getCloudflareApiKey(): string | null {
-	return normalizeApiKey(process.env.CLOUDFLARE_API_KEY) ?? normalizeApiKey(getWebAccessConfiguration().current().cloudflareApiKey);
+/** Resolves the Cloudflare gateway key, preserving environment precedence. */
+export function getCloudflareApiKey(settings?: GeminiApiSettings): string | null {
+	return normalizeApiKey(process.env.CLOUDFLARE_API_KEY) ?? normalizeApiKey(currentSettings(settings).cloudflareApiKey);
 }
 
-export function isGatewayConfigured(): boolean {
-	return isCloudflareGateway() && getCloudflareApiKey() !== null;
+/** Reports whether a Cloudflare Gemini gateway has complete authentication. */
+export function isGatewayConfigured(settings?: GeminiApiSettings): boolean {
+	return isCloudflareGateway(settings) && getCloudflareApiKey(settings) !== null;
 }
 
-export function buildAuthHeaders(): Record<string, string> {
-	if (!isCloudflareGateway()) return {};
-	const cloudflareApiKey = getCloudflareApiKey();
+/** Builds gateway authorization headers for the captured settings value. */
+export function buildAuthHeaders(settings?: GeminiApiSettings): Record<string, string> {
+	if (!isCloudflareGateway(settings)) return {};
+	const cloudflareApiKey = getCloudflareApiKey(settings);
 	return cloudflareApiKey ? { "cf-aig-authorization": `Bearer ${cloudflareApiKey}` } : {};
 }
 
-export function isGeminiApiAvailable(): boolean {
-	return getApiKey() !== null || isGatewayConfigured();
+/** Reports Gemini API or gateway eligibility for the captured settings value. */
+export function isGeminiApiAvailable(settings?: GeminiApiSettings): boolean {
+	return getApiKey(settings) !== null || isGatewayConfigured(settings);
 }
 
+/** Controls Gemini video generation requests. */
 export interface GeminiApiOptions {
 	model?: string;
 	mimeType?: string;
@@ -73,13 +88,15 @@ export interface GeminiApiOptions {
 	timeoutMs?: number;
 }
 
+/** Queries Gemini for video understanding and throws on unavailable or empty responses. */
 export async function queryGeminiApiWithVideo(
 	prompt: string,
 	videoUri: string,
 	options: GeminiApiOptions = {},
+	settings?: GeminiApiSettings,
 ): Promise<string> {
-	const apiKey = getApiKey();
-	if (!apiKey && !isGatewayConfigured()) {
+	const apiKey = getApiKey(settings);
+	if (!apiKey && !isGatewayConfigured(settings)) {
 		throw new Error(
 			"Gemini API not configured. Either:\n" +
 			`  1. Set GEMINI_API_KEY in ${getWebAccessConfiguration().sourcePath}\n` +
@@ -89,7 +106,7 @@ export async function queryGeminiApiWithVideo(
 
 	const model = options.model ?? DEFAULT_MODEL;
 	const signal = withTimeout(options.signal, options.timeoutMs ?? 120000);
-	const url = `${getVersionedApiBase()}/models/${model}:generateContent${buildKeyParam(apiKey)}`;
+	const url = `${getVersionedApiBase(settings)}/models/${model}:generateContent${buildKeyParam(apiKey, settings)}`;
 
 	const fileData: Record<string, string> = { fileUri: videoUri };
 	if (options.mimeType) fileData.mimeType = options.mimeType;
@@ -108,7 +125,7 @@ export async function queryGeminiApiWithVideo(
 
 	const res = await fetchOwnedResponse(url, {
 		method: "POST",
-		headers: { "Content-Type": "application/json", ...buildAuthHeaders() },
+		headers: { "Content-Type": "application/json", ...buildAuthHeaders(settings) },
 		body: JSON.stringify(body),
 	}, signal);
 

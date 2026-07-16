@@ -185,6 +185,7 @@ export async function searchWithBrave(
 	}
 }
 
+/** Creates a Brave adapter that captures persistent credentials while preserving environment precedence. */
 export function createBraveSearchProvider(settings: Pick<WebAccessSettings, "braveApiKey">): SearchProviderAdapter<"brave"> {
 	return {
 		name: "brave",

@@ -1,5 +1,5 @@
 import { activityMonitor } from "./activity.ts";
-import { getWebAccessConfiguration } from "./configuration.ts";
+import { getWebAccessConfiguration, type WebAccessSettings } from "./configuration.ts";
 import {
 	getApiKey,
 	getVersionedApiBase,
@@ -26,16 +26,21 @@ export type {
 	SearchProvider,
 } from "./search-provider.ts";
 
-function getSearchConfig(): { searchProvider: SearchProvider; searchModel: string } {
-	const settings = getWebAccessConfiguration().current();
-	return {
-		searchProvider: settings.searchProvider ?? settings.provider,
-		searchModel: settings.searchModel,
-	};
+type GeminiSearchSettings = Pick<WebAccessSettings,
+	"provider" | "searchProvider" | "searchModel" | "geminiApiKey" | "geminiBaseUrl" |
+	"cloudflareApiKey" | "allowBrowserCookies" | "chromeProfile"
+>;
+
+function currentSettings(settings?: GeminiSearchSettings): GeminiSearchSettings {
+	return settings ?? getWebAccessConfiguration().current();
 }
 
-function getSearchModel(): string {
-	return getSearchConfig().searchModel;
+function getSearchConfig(settings?: GeminiSearchSettings): { searchProvider: SearchProvider; searchModel: string } {
+	const captured = currentSettings(settings);
+	return {
+		searchProvider: captured.searchProvider ?? captured.provider,
+		searchModel: captured.searchModel,
+	};
 }
 
 function errorMessage(error: unknown): string {
@@ -46,11 +51,15 @@ function throwIfCallerCancelled(signal: AbortSignal | undefined): void {
 	if (signal?.aborted) signal.throwIfAborted();
 }
 
-async function searchWithGemini(query: string, options: SearchOptions): Promise<SearchResponse> {
+async function searchWithGemini(
+	query: string,
+	options: SearchOptions,
+	settings?: GeminiSearchSettings,
+): Promise<SearchResponse> {
 	const errors: string[] = [];
 
 	try {
-		const apiResult = await searchWithGeminiApi(query, options);
+		const apiResult = await searchWithGeminiApi(query, options, settings);
 		throwIfCallerCancelled(options.signal);
 		if (apiResult) return apiResult;
 	} catch (error) {
@@ -59,7 +68,7 @@ async function searchWithGemini(query: string, options: SearchOptions): Promise<
 	}
 
 	try {
-		const webResult = await searchWithGeminiWeb(query, options);
+		const webResult = await searchWithGeminiWeb(query, options, settings);
 		throwIfCallerCancelled(options.signal);
 		if (webResult) return webResult;
 	} catch (error) {
@@ -79,14 +88,20 @@ async function searchWithGemini(query: string, options: SearchOptions): Promise<
 	);
 }
 
-export const geminiSearchProvider: SearchProviderAdapter<"gemini"> = {
-	name: "gemini",
-	label: "Gemini",
-	eligibility: async () => isGeminiApiAvailable() || !!(await isGeminiWebAvailable())
-		? { eligible: true }
-		: { eligible: false, reason: "Gemini API, gateway, and browser credentials are not available." },
-	search: ({ query, options }) => searchWithGemini(query, options),
-};
+/** Creates a Gemini provider that closes over one immutable settings snapshot. */
+export function createGeminiSearchProvider(settings?: GeminiSearchSettings): SearchProviderAdapter<"gemini"> {
+	return {
+		name: "gemini",
+		label: "Gemini",
+		eligibility: async () => isGeminiApiAvailable(settings) || !!(await isGeminiWebAvailable(undefined, settings))
+			? { eligible: true }
+			: { eligible: false, reason: "Gemini API, gateway, and browser credentials are not available." },
+		search: ({ query, options }) => searchWithGemini(query, options, settings),
+	};
+}
+
+/** Backwards-compatible Gemini adapter that resolves process configuration per operation. */
+export const geminiSearchProvider: SearchProviderAdapter<"gemini"> = createGeminiSearchProvider();
 
 /** @deprecated Use the extension-registered Web search tool. */
 export async function search(query: string, options: FullSearchOptions = {}): Promise<AttributedSearchResponse> {
@@ -99,22 +114,26 @@ export async function search(query: string, options: FullSearchOptions = {}): Pr
 	});
 }
 
-async function searchWithGeminiApi(query: string, options: SearchOptions = {}): Promise<SearchResponse | null> {
-	const apiKey = getApiKey();
-	if (!apiKey && !isGatewayConfigured()) return null;
+async function searchWithGeminiApi(
+	query: string,
+	options: SearchOptions = {},
+	settings?: GeminiSearchSettings,
+): Promise<SearchResponse | null> {
+	const apiKey = getApiKey(settings);
+	if (!apiKey && !isGatewayConfigured(settings)) return null;
 
 	const activityId = activityMonitor.logStart({ type: "api", query });
 
 	try {
-		const model = getSearchModel();
+		const model = getSearchConfig(settings).searchModel;
 		const body = {
 			contents: [{ role: "user", parts: [{ text: query }] }],
 			tools: [{ google_search: {} }],
 		};
 
-		const res = await fetch(`${getVersionedApiBase()}/models/${model}:generateContent${buildKeyParam(apiKey)}`, {
+		const res = await fetch(`${getVersionedApiBase(settings)}/models/${model}:generateContent${buildKeyParam(apiKey, settings)}`, {
 			method: "POST",
-			headers: { "Content-Type": "application/json", ...buildAuthHeaders() },
+			headers: { "Content-Type": "application/json", ...buildAuthHeaders(settings) },
 			body: JSON.stringify(body),
 			signal: AbortSignal.any([
 				AbortSignal.timeout(60000),
@@ -149,8 +168,12 @@ async function searchWithGeminiApi(query: string, options: SearchOptions = {}): 
 	}
 }
 
-async function searchWithGeminiWeb(query: string, options: SearchOptions = {}): Promise<SearchResponse | null> {
-	const cookies = await isGeminiWebAvailable();
+async function searchWithGeminiWeb(
+	query: string,
+	options: SearchOptions = {},
+	settings?: GeminiSearchSettings,
+): Promise<SearchResponse | null> {
+	const cookies = await isGeminiWebAvailable(undefined, settings);
 	if (!cookies) return null;
 
 	const prompt = buildSearchPrompt(query, options);

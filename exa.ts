@@ -428,6 +428,7 @@ export async function searchWithExa(query: string, options: ExaSearchOptions = {
 	}
 }
 
+/** Creates an Exa adapter that captures persistent credentials while preserving environment precedence. */
 export function createExaSearchProvider(settings: Pick<WebAccessSettings, "exaApiKey">): SearchProviderAdapter<"exa"> {
 	return {
 		name: "exa", label: "Exa",

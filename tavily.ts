@@ -179,6 +179,7 @@ export async function searchWithTavily(query: string, options: TavilySearchOptio
 	return result;
 }
 
+/** Creates a Tavily adapter that captures persistent credentials while preserving environment precedence. */
 export function createTavilySearchProvider(settings: Pick<WebAccessSettings, "tavilyApiKey">): SearchProviderAdapter<"tavily"> {
 	return {
 		name: "tavily", label: "Tavily",

@@ -1,4 +1,6 @@
-import { getWebAccessConfiguration } from "./configuration.ts";
+import { getWebAccessConfiguration, type WebAccessSettings } from "./configuration.ts";
+
+type GeminiWebSettings = Pick<WebAccessSettings, "allowBrowserCookies" | "chromeProfile">;
 
 export function normalizeChromeProfile(value: unknown): string | undefined {
 	if (typeof value !== "string") return undefined;
@@ -6,13 +8,13 @@ export function normalizeChromeProfile(value: unknown): string | undefined {
 	return normalized.length > 0 ? normalized : undefined;
 }
 
-export function getChromeProfileFromConfig(): string | undefined {
-	return getWebAccessConfiguration().current().chromeProfile;
+export function getChromeProfileFromConfig(settings?: GeminiWebSettings): string | undefined {
+	return (settings ?? getWebAccessConfiguration().current()).chromeProfile;
 }
 
-export function isBrowserCookieAccessAllowed(): boolean {
+export function isBrowserCookieAccessAllowed(settings?: GeminiWebSettings): boolean {
 	if (process.env.PI_ALLOW_BROWSER_COOKIES === "1" || process.env.FEYNMAN_ALLOW_BROWSER_COOKIES === "1") {
 		return true;
 	}
-	return getWebAccessConfiguration().current().allowBrowserCookies;
+	return (settings ?? getWebAccessConfiguration().current()).allowBrowserCookies;
 }

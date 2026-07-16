@@ -149,6 +149,7 @@ export async function searchWithPerplexity(query: string, options: SearchOptions
 	return { answer, results };
 }
 
+/** Creates a Perplexity adapter that captures persistent credentials while preserving environment precedence. */
 export function createPerplexitySearchProvider(settings: Pick<WebAccessSettings, "perplexityApiKey">): SearchProviderAdapter<"perplexity"> {
 	return {
 		name: "perplexity", label: "Perplexity",

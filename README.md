@@ -257,16 +257,8 @@ Every field is optional. If the file is missing, Web Access uses the defaults sh
   "webSearch": {
     "enabled": true
   },
-  "openaiApiKey": "sk-...",
-  "braveApiKey": "BSA_...",
-  "exaApiKey": "exa-...",
-  "parallelApiKey": "...",
-  "tavilyApiKey": "tvly-...",
-  "perplexityApiKey": "pplx-...",
-  "geminiApiKey": "AIza...",
   "allowBrowserCookies": false,
-  "searchModel": "gemini-2.5-flash",
-  "summaryModel": "openai-codex/gpt-5.3-codex-spark",
+  "searchModel": "gemini-3-flash-preview",
   "workflow": "none",
   "curatorTimeoutSeconds": 20,
   "githubClone": {
@@ -289,12 +281,12 @@ Every field is optional. If the file is missing, Web Access uses the defaults sh
     "activity": "ctrl+shift+w"
   },
   "ssrf": {
-    "allowRanges": ["198.18.0.0/15"]
+    "allowRanges": []
   }
 }
 ```
 
-The same file also supports `geminiBaseUrl`, `cloudflareApiKey`, and `chromeProfile`. The legacy `searchProvider` field remains accepted for compatibility; `provider` is the current default-provider field. Omitted credentials and `summaryModel` remain unset.
+The same file also supports optional `openaiApiKey`, `braveApiKey`, `exaApiKey`, `parallelApiKey`, `tavilyApiKey`, `perplexityApiKey`, `geminiApiKey`, `geminiBaseUrl`, `cloudflareApiKey`, `chromeProfile`, and `summaryModel` fields. The legacy `searchProvider` field remains accepted for compatibility; `provider` is the current default-provider field. All credentials and `summaryModel` are unset by default.
 
 Set `webSearch.enabled` to `false` to unregister the `web_search` tool while keeping content-fetching tools available.
 

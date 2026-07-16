@@ -342,6 +342,7 @@ async function parallelFetch(
 	}
 }
 
+/** Creates a Parallel adapter that captures persistent credentials while preserving environment precedence. */
 export function createParallelSearchProvider(settings: Pick<WebAccessSettings, "parallelApiKey">): SearchProviderAdapter<"parallel"> {
 	return {
 		name: "parallel", label: "Parallel",

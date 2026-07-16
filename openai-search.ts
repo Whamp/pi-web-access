@@ -377,6 +377,7 @@ export async function searchWithOpenAI(
 	}
 }
 
+/** Creates an OpenAI adapter that captures persistent credentials while preserving login and environment precedence. */
 export function createOpenAISearchProvider(settings: Pick<WebAccessSettings, "openaiApiKey">): SearchProviderAdapter<"openai"> {
 	return {
 		name: "openai", label: "OpenAI",

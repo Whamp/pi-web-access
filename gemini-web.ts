@@ -1,5 +1,7 @@
+import { readFileSync } from "node:fs";
 import { basename } from "node:path";
 import { type CookieMap, getGoogleCookies } from "./chrome-cookies.ts";
+import type { WebAccessSettings } from "./configuration.ts";
 import { getChromeProfileFromConfig, isBrowserCookieAccessAllowed, normalizeChromeProfile } from "./gemini-web-config.ts";
 import { discardResponseBody, fetchOwnedResponse, readResponseText } from "./response-body.ts";
 
@@ -31,11 +33,14 @@ export interface GeminiWebOptions {
 	timeoutMs?: number;
 }
 
-export async function isGeminiWebAvailable(chromeProfile?: string): Promise<CookieMap | null> {
-	if (!isBrowserCookieAccessAllowed()) return null;
+export async function isGeminiWebAvailable(
+	chromeProfile?: string,
+	settings?: Pick<WebAccessSettings, "allowBrowserCookies" | "chromeProfile">,
+): Promise<CookieMap | null> {
+	if (!isBrowserCookieAccessAllowed(settings)) return null;
 
 	const result = await getGoogleCookies({
-		profile: normalizeChromeProfile(chromeProfile) ?? getChromeProfileFromConfig(),
+		profile: normalizeChromeProfile(chromeProfile) ?? getChromeProfileFromConfig(settings),
 		requiredCookies: REQUIRED_COOKIES,
 	});
 	if (!result) return null;
