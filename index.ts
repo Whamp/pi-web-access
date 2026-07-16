@@ -520,7 +520,7 @@ export default function (pi: ExtensionAPI) {
 			await Promise.all(missing.map(async ([key, url]) => {
 				let item: ExtractedContent | undefined;
 				try {
-					[item] = await fetchAllContent([url], contentSignal, undefined, initConfig);
+					[item] = await fetchAllContent([url], contentSignal, { settings: initConfig });
 				} catch (error) {
 					if (executionSignal.aborted) throw executionSignal.reason;
 					if (!deadlineSignal.aborted) throw error;
@@ -1595,7 +1595,7 @@ export default function (pi: ExtensionAPI) {
 				details: { phase: "fetch", progress: 0 },
 			});
 
-			const fetchResults = await fetchAllContent(urlList, signal, options, initConfig);
+			const fetchResults = await fetchAllContent(urlList, signal, { ...options, settings: initConfig });
 			const successful = fetchResults.filter((r) => !r.error).length;
 			const totalChars = fetchResults.reduce((sum, r) => sum + r.content.length, 0);
 

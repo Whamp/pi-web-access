@@ -5,9 +5,7 @@ import { activityMonitor } from "./activity.ts";
 import { settleWithAbort } from "./abort.ts";
 import type { ExtractedContent } from "./extract.ts";
 import { checkGhAvailable, checkRepoSize, fetchViaApi, showGhHint } from "./github-api.ts";
-import { getWebSearchConfigPath } from "./utils.ts";
-
-const CONFIG_PATH = getWebSearchConfigPath();
+import { DEFAULT_WEB_ACCESS_SETTINGS, type WebAccessSettings } from "./configuration.ts";
 
 const BINARY_EXTENSIONS = new Set([
 	".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".webp", ".svg", ".tiff", ".tif",
@@ -44,65 +42,9 @@ interface CachedClone {
 	clonePromise: Promise<string | null>;
 }
 
-interface GitHubCloneConfig {
-	enabled: boolean;
-	maxRepoSizeMB: number;
-	cloneTimeoutSeconds: number;
-	clonePath: string;
-}
+type GitHubCloneConfig = Readonly<WebAccessSettings["githubClone"]>;
 
 const cloneCache = new Map<string, CachedClone>();
-
-let cachedConfig: GitHubCloneConfig | null = null;
-
-function normalizeEnabled(value: unknown, fallback: boolean): boolean {
-	return typeof value === "boolean" ? value : fallback;
-}
-
-function normalizePositiveNumber(value: unknown, fallback: number): number {
-	if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
-	return value > 0 ? value : fallback;
-}
-
-function normalizeClonePath(value: unknown, fallback: string): string {
-	if (typeof value !== "string") return fallback;
-	const normalized = value.trim();
-	return normalized.length > 0 ? normalized : fallback;
-}
-
-function loadGitHubConfig(): GitHubCloneConfig {
-	if (cachedConfig) return cachedConfig;
-
-	const defaults: GitHubCloneConfig = {
-		enabled: true,
-		maxRepoSizeMB: 350,
-		cloneTimeoutSeconds: 30,
-		clonePath: "/tmp/pi-github-repos",
-	};
-
-	if (!existsSync(CONFIG_PATH)) {
-		cachedConfig = defaults;
-		return cachedConfig;
-	}
-
-	const rawText = readFileSync(CONFIG_PATH, "utf-8");
-	let raw: { githubClone?: { enabled?: unknown; maxRepoSizeMB?: unknown; cloneTimeoutSeconds?: unknown; clonePath?: unknown } };
-	try {
-		raw = JSON.parse(rawText) as { githubClone?: { enabled?: unknown; maxRepoSizeMB?: unknown; cloneTimeoutSeconds?: unknown; clonePath?: unknown } };
-	} catch (err) {
-		const message = err instanceof Error ? err.message : String(err);
-		throw new Error(`Failed to parse ${CONFIG_PATH}: ${message}`);
-	}
-
-	const gc = raw.githubClone ?? {};
-	cachedConfig = {
-		enabled: normalizeEnabled(gc.enabled, defaults.enabled),
-		maxRepoSizeMB: normalizePositiveNumber(gc.maxRepoSizeMB, defaults.maxRepoSizeMB),
-		cloneTimeoutSeconds: normalizePositiveNumber(gc.cloneTimeoutSeconds, defaults.cloneTimeoutSeconds),
-		clonePath: normalizeClonePath(gc.clonePath, defaults.clonePath),
-	};
-	return cachedConfig;
-}
 
 const NON_CODE_SEGMENTS = new Set([
 	"issues", "pull", "pulls", "discussions", "releases", "wiki",
@@ -526,13 +468,13 @@ export async function extractGitHub(
 	url: string,
 	signal?: AbortSignal,
 	forceClone?: boolean,
+	config: GitHubCloneConfig = DEFAULT_WEB_ACCESS_SETTINGS.githubClone,
 ): Promise<ExtractedContent | null> {
 	const info = parseGitHubUrl(url);
 	if (!info) return null;
 
 	if (signal?.aborted) return null;
 
-	const config = loadGitHubConfig();
 	if (!config.enabled) return null;
 
 	const { owner, repo } = info;
@@ -646,5 +588,4 @@ export function clearCloneCache(): void {
 		}
 	}
 	cloneCache.clear();
-	cachedConfig = null;
 }

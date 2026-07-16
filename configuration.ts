@@ -77,7 +77,7 @@ const NESTED_KEYS: Record<string, ReadonlySet<string>> = {
 	ssrf: new Set(["allowRanges"]),
 };
 
-const DEFAULTS: WebAccessSettings = {
+export const DEFAULT_WEB_ACCESS_SETTINGS: Readonly<WebAccessSettings> = freezeSettings({
 	provider: "auto",
 	webSearch: { enabled: true },
 	allowBrowserCookies: false,
@@ -89,7 +89,7 @@ const DEFAULTS: WebAccessSettings = {
 	video: { enabled: true, preferredModel: "gemini-3-flash-preview", maxSizeMB: 50 },
 	shortcuts: { curate: "ctrl+shift+s", activity: "ctrl+shift+w" },
 	ssrf: { allowRanges: [] },
-};
+});
 
 type MutableSettings = { -readonly [K in keyof WebAccessSettings]: WebAccessSettings[K] };
 type JsonObject = Record<string, unknown>;
@@ -144,7 +144,7 @@ function unknownKeys(raw: JsonObject): string[] {
 }
 
 function normalize(raw: JsonObject, path: string): Readonly<WebAccessSettings> {
-	const settings = structuredClone(DEFAULTS) as MutableSettings;
+	const settings = structuredClone(DEFAULT_WEB_ACCESS_SETTINGS) as MutableSettings;
 	if (raw.provider !== undefined) settings.provider = providerAt(raw.provider, path, "provider");
 	if (raw.searchProvider !== undefined) settings.searchProvider = providerAt(raw.searchProvider, path, "searchProvider");
 	if (raw.allowBrowserCookies !== undefined) settings.allowBrowserCookies = booleanAt(raw.allowBrowserCookies, path, "allowBrowserCookies");

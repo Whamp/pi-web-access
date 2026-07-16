@@ -11,10 +11,9 @@ import { isYouTubeURL, isYouTubeEnabled, extractYouTube, extractYouTubeFrame, ex
 import { extractWithUrlContext, extractWithGeminiWeb } from "./gemini-url-context.ts";
 import { extractWithParallel, isParallelAvailable } from "./parallel.ts";
 import { isVideoFile, extractVideo, extractVideoFrame, getLocalVideoDuration } from "./video-extract.ts";
-import { existsSync, readFileSync } from "node:fs";
 import { fetchRemoteUrl, validateRemoteUrl, type Lookup } from "./ssrf-protection.ts";
-import type { WebAccessSettings } from "./configuration.ts";
 import { formatSeconds, getWebSearchConfigPath } from "./utils.ts";
+import { DEFAULT_WEB_ACCESS_SETTINGS, type WebAccessSettings } from "./configuration.ts";
 import { discardResponseBody, fetchOwnedResponse, readResponseBytes, readResponseText } from "./response-body.ts";
 
 const DEFAULT_TIMEOUT_MS = 30000;
@@ -24,38 +23,7 @@ const NON_RECOVERABLE_ERRORS = ["Unsupported content type", "Response too large"
 const MIN_USEFUL_CONTENT = 500;
 const WEB_SEARCH_CONFIG_PATH = getWebSearchConfigPath();
 
-/**
- * Read `ssrf.allowRanges` (CIDR strings) from web-search.json. Returns [] when
- * the file is missing, unreadable, or the key is unset so SSRF protection stays
- * fully on by default. Throws when `ssrf.allowRanges` is present but not an array
- * so a mistyped value (e.g. a bare string instead of a JSON array) fails loudly
- * instead of being silently ignored. Exempts synthetic ranges used by TUN/fake-IP
- * proxies (e.g. 198.18.0.0/15).
- */
-export function loadSsrfAllowRanges(): string[] {
-	let value: unknown;
-	try {
-		if (!existsSync(WEB_SEARCH_CONFIG_PATH)) return [];
-		const raw = readFileSync(WEB_SEARCH_CONFIG_PATH, "utf-8");
-		value = (JSON.parse(raw) as { ssrf?: { allowRanges?: unknown } })?.ssrf?.allowRanges;
-	} catch {
-		// Missing/unreadable file or invalid JSON: fail safe with SSRF fully on.
-		return [];
-	}
-	if (value === undefined || value === null) return [];
-	if (!Array.isArray(value)) {
-		throw new Error(`ssrf.allowRanges in ${WEB_SEARCH_CONFIG_PATH} must be an array of CIDR strings`);
-	}
-	const ranges: string[] = [];
-	for (const [index, entry] of value.entries()) {
-		if (typeof entry !== "string") {
-			throw new Error(`ssrf.allowRanges in ${WEB_SEARCH_CONFIG_PATH} must contain only CIDR strings; entry ${index + 1} is ${typeof entry}`);
-		}
-		const trimmed = entry.trim();
-		if (trimmed) ranges.push(trimmed);
-	}
-	return ranges;
-}
+type ContentRetrievalSettings = Pick<WebAccessSettings, "ssrf" | "githubClone" | "parallelApiKey">;
 
 function errorMessage(err: unknown): string {
 	return err instanceof Error ? err.message : String(err);
@@ -100,6 +68,8 @@ export interface ExtractedContent {
 }
 
 export interface ExtractOptions {
+	/** Validated settings captured when this content retrieval starts. */
+	settings?: Readonly<ContentRetrievalSettings>;
 	timeoutMs?: number;
 	forceClone?: boolean;
 	prompt?: string;
@@ -117,6 +87,7 @@ async function extractWithJinaReader(
 	url: string,
 	signal?: AbortSignal,
 	lookup?: Lookup,
+	allowRanges: readonly string[] = DEFAULT_WEB_ACCESS_SETTINGS.ssrf.allowRanges,
 ): Promise<ExtractedContent | null> {
 	const jinaUrl = JINA_READER_BASE + url;
 
@@ -127,7 +98,7 @@ async function extractWithJinaReader(
 			AbortSignal.timeout(JINA_TIMEOUT_MS),
 			...(signal ? [signal] : []),
 		]);
-		await validateRemoteUrl(url, { allowRanges: loadSsrfAllowRanges(), lookup, signal: requestSignal });
+		await validateRemoteUrl(url, { allowRanges, lookup, signal: requestSignal });
 		const res = await fetchOwnedResponse(jinaUrl, {
 			headers: {
 				"Accept": "text/markdown",
@@ -254,7 +225,6 @@ export async function extractContent(
 	url: string,
 	signal?: AbortSignal,
 	options?: ExtractOptions,
-	settings: Pick<WebAccessSettings, "parallelApiKey"> = {},
 ): Promise<ExtractedContent> {
 	if (signal?.aborted) {
 		return { url, title: "", content: "", error: "Aborted" };
@@ -412,14 +382,14 @@ export async function extractContent(
 	try {
 		const parsed = new URL(url);
 		if (parsed.protocol === "http:" || parsed.protocol === "https:") {
-			await validateRemoteUrl(parsed, { allowRanges: loadSsrfAllowRanges(), lookup: options?.lookup, signal });
+			await validateRemoteUrl(parsed, { allowRanges: options?.settings?.ssrf.allowRanges ?? DEFAULT_WEB_ACCESS_SETTINGS.ssrf.allowRanges, lookup: options?.lookup, signal });
 		}
 	} catch (err) {
 		return { url, title: "", content: "", error: errorMessage(err) };
 	}
 
 	try {
-		const ghResult = await extractGitHub(url, signal, options?.forceClone);
+		const ghResult = await extractGitHub(url, signal, options?.forceClone, options?.settings?.githubClone ?? DEFAULT_WEB_ACCESS_SETTINGS.githubClone);
 		if (ghResult) return ghResult;
 		if (signal?.aborted) return abortedResult(url);
 	} catch (err) {
@@ -463,12 +433,13 @@ export async function extractContent(
 	if (!httpResult.error) return httpResult;
 	if (NON_RECOVERABLE_ERRORS.some(prefix => httpResult.error!.startsWith(prefix))) return httpResult;
 
-	const jinaResult = await extractWithJinaReader(url, signal, options?.lookup);
+	const jinaResult = await extractWithJinaReader(url, signal, options?.lookup, options?.settings?.ssrf.allowRanges);
 	if (jinaResult) return jinaResult;
 	if (signal?.aborted) return abortedResult(url);
 
 	let parallelError: string | null = null;
 	try {
+		const settings = options?.settings ?? {};
 		if (isParallelAvailable(settings)) {
 			const parallelResult = await extractWithParallel(url, signal, options, settings);
 			if (parallelResult) return parallelResult;
@@ -562,7 +533,7 @@ async function extractViaHttp(
 					"Upgrade-Insecure-Requests": "1",
 				},
 			},
-			{ allowRanges: loadSsrfAllowRanges(), lookup: options?.lookup, signal: controller.signal },
+			{ allowRanges: options?.settings?.ssrf.allowRanges ?? DEFAULT_WEB_ACCESS_SETTINGS.ssrf.allowRanges, lookup: options?.lookup, signal: controller.signal },
 		);
 
 		if (!response.ok) {
@@ -708,12 +679,11 @@ function fetchLimitedContent(
 	url: string,
 	signal?: AbortSignal,
 	options?: ExtractOptions,
-	settings: Pick<WebAccessSettings, "parallelApiKey"> = {},
 ): Promise<ExtractedContent> {
 	return fetchLimit.run(async () => {
 		if (signal?.aborted) return abortedResult(url);
 		try {
-			return await extractContent(url, signal, options, settings);
+			return await extractContent(url, signal, options);
 		} catch (error) {
 			if (signal?.aborted) return abortedResult(url);
 			throw error;
@@ -725,7 +695,6 @@ export async function fetchAllContent(
 	urls: string[],
 	signal?: AbortSignal,
 	options?: ExtractOptions,
-	settings: Pick<WebAccessSettings, "parallelApiKey"> = {},
 ): Promise<ExtractedContent[]> {
-	return Promise.all(urls.map((url) => fetchLimitedContent(url, signal, options, settings)));
+	return Promise.all(urls.map((url) => fetchLimitedContent(url, signal, options)));
 }

@@ -20,7 +20,7 @@ interface ValidationOptions {
 	 * that resolves public domains into a reserved range. Entries are validated
 	 * strictly; an invalid entry throws so misconfiguration is not silent.
 	 */
-	allowRanges?: string[];
+	allowRanges?: readonly string[];
 }
 
 /** Parsed entry from `allowRanges`: a network address (4 or 16 bytes) + prefix length. */
