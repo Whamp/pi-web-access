@@ -1,16 +1,10 @@
-import { existsSync, readFileSync } from "node:fs";
 import { activityMonitor } from "./activity.ts";
 import type { ExtractedContent } from "./extract.ts";
 import type { SearchOptions, SearchProviderAdapter, SearchResponse } from "./search-provider.ts";
-import { getWebSearchConfigPath } from "./utils.ts";
+import { getWebAccessConfiguration, type WebAccessSettings } from "./configuration.ts";
 
 const TAVILY_API_URL = "https://api.tavily.com/search";
-const CONFIG_PATH = getWebSearchConfigPath();
 const SEARCH_TIMEOUT_MS = 60_000;
-
-interface WebSearchConfig {
-	tavilyApiKey?: unknown;
-}
 
 interface TavilyResult {
 	title?: string;
@@ -28,41 +22,22 @@ interface TavilySearchOptions extends SearchOptions {
 	includeContent?: boolean;
 }
 
-let cachedConfig: WebSearchConfig | null = null;
-
-function loadConfig(): WebSearchConfig {
-	if (cachedConfig) return cachedConfig;
-	if (!existsSync(CONFIG_PATH)) {
-		cachedConfig = {};
-		return cachedConfig;
-	}
-
-	const raw = readFileSync(CONFIG_PATH, "utf-8");
-	try {
-		cachedConfig = JSON.parse(raw) as WebSearchConfig;
-		return cachedConfig;
-	} catch (err) {
-		const message = err instanceof Error ? err.message : String(err);
-		throw new Error(`Failed to parse ${CONFIG_PATH}: ${message}`);
-	}
-}
-
 function normalizeApiKey(value: unknown): string | null {
 	if (typeof value !== "string") return null;
 	const normalized = value.trim();
 	return normalized.length > 0 ? normalized : null;
 }
 
-function getApiKey(): string | null {
-	return normalizeApiKey(process.env.TAVILY_API_KEY) ?? normalizeApiKey(loadConfig().tavilyApiKey);
+function getApiKey(settings: Pick<WebAccessSettings, "tavilyApiKey">): string | null {
+	return normalizeApiKey(process.env.TAVILY_API_KEY) ?? normalizeApiKey(settings.tavilyApiKey);
 }
 
-function requireApiKey(): string {
-	const apiKey = getApiKey();
+function requireApiKey(settings: Pick<WebAccessSettings, "tavilyApiKey">): string {
+	const apiKey = getApiKey(settings);
 	if (!apiKey) {
 		throw new Error(
 			"Tavily API key not found. Either:\n" +
-			`  1. Create ${CONFIG_PATH} with { "tavilyApiKey": "your-key" }\n` +
+			`  1. Create ${getWebAccessConfiguration().sourcePath} with { "tavilyApiKey": "your-key" }\n` +
 			"  2. Set TAVILY_API_KEY environment variable\n" +
 			"Get a key at https://app.tavily.com/",
 		);
@@ -143,11 +118,11 @@ function mapInlineContent(results: TavilyResult[] | undefined): ExtractedContent
 	});
 }
 
-export function isTavilyAvailable(): boolean {
-	return !!getApiKey();
+export function isTavilyAvailable(settings: Pick<WebAccessSettings, "tavilyApiKey"> = {}): boolean {
+	return !!getApiKey(settings);
 }
 
-export async function searchWithTavily(query: string, options: TavilySearchOptions = {}): Promise<SearchResponse> {
+export async function searchWithTavily(query: string, options: TavilySearchOptions = {}, settings: Pick<WebAccessSettings, "tavilyApiKey"> = {}): Promise<SearchResponse> {
 	const numResults = normalizeCount(options.numResults);
 	const body: Record<string, unknown> = {
 		query,
@@ -165,7 +140,7 @@ export async function searchWithTavily(query: string, options: TavilySearchOptio
 		response = await fetch(TAVILY_API_URL, {
 			method: "POST",
 			headers: {
-				"Authorization": `Bearer ${requireApiKey()}`,
+				"Authorization": `Bearer ${requireApiKey(settings)}`,
 				"Content-Type": "application/json",
 			},
 			body: JSON.stringify(body),
@@ -204,11 +179,13 @@ export async function searchWithTavily(query: string, options: TavilySearchOptio
 	return result;
 }
 
-export const tavilySearchProvider: SearchProviderAdapter<"tavily"> = {
-	name: "tavily",
-	label: "Tavily",
-	eligibility: () => isTavilyAvailable()
-		? { eligible: true }
-		: { eligible: false, reason: "Tavily API key is not configured." },
-	search: ({ query, options }) => searchWithTavily(query, options),
-};
+/** Creates a Tavily adapter that captures persistent credentials while preserving environment precedence. */
+export function createTavilySearchProvider(settings: Pick<WebAccessSettings, "tavilyApiKey">): SearchProviderAdapter<"tavily"> {
+	return {
+		name: "tavily", label: "Tavily",
+		eligibility: () => isTavilyAvailable(settings) ? { eligible: true } : { eligible: false, reason: "Tavily API key is not configured." },
+		search: ({ query, options }) => searchWithTavily(query, options, settings),
+	};
+}
+
+export const tavilySearchProvider = createTavilySearchProvider({});

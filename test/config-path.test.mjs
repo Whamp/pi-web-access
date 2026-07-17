@@ -5,9 +5,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-const utilsUrl = new URL("../utils.ts", import.meta.url).href;
 const perplexityUrl = new URL("../perplexity.ts", import.meta.url).href;
+const configurationUrl = new URL("../configuration.ts", import.meta.url).href;
 const geminiApiUrl = new URL("../gemini-api.ts", import.meta.url).href;
+const geminiWebConfigUrl = new URL("../gemini-web-config.ts", import.meta.url).href;
+const geminiSearchUrl = new URL("../gemini-search.ts", import.meta.url).href;
 
 function runChild(script, env) {
 	const childEnv = { ...process.env };
@@ -39,12 +41,12 @@ test("web-search config path uses PI_CODING_AGENT_DIR before XDG_CONFIG_HOME", a
 	await writeFile(join(xdgDir, "pi", "web-search.json"), JSON.stringify({}) + "\n", "utf8");
 
 	const child = runChild(`
-		const { getWebSearchConfigDir, getWebSearchConfigPath } = await import(${JSON.stringify(utilsUrl)});
+		const { createWebAccessConfiguration } = await import(${JSON.stringify(configurationUrl)});
+		const configuration = createWebAccessConfiguration();
 		const { isPerplexityAvailable } = await import(${JSON.stringify(perplexityUrl)});
 		console.log(JSON.stringify({
-			dir: getWebSearchConfigDir(),
-			path: getWebSearchConfigPath(),
-			available: isPerplexityAvailable(),
+			path: configuration.sourcePath,
+			available: isPerplexityAvailable(configuration.current()),
 		}));
 	`, {
 		PI_CODING_AGENT_DIR: agentDir,
@@ -55,7 +57,6 @@ test("web-search config path uses PI_CODING_AGENT_DIR before XDG_CONFIG_HOME", a
 
 	assert.equal(child.status, 0, child.stderr);
 	assert.deepEqual(JSON.parse(child.stdout), {
-		dir: agentDir,
 		path: join(agentDir, "web-search.json"),
 		available: true,
 	});
@@ -68,11 +69,10 @@ test("web-search config path uses XDG_CONFIG_HOME pi directory when agent dir is
 	await writeFile(join(xdgDir, "pi", "web-search.json"), JSON.stringify({ geminiApiKey: "gemini-from-xdg" }) + "\n", "utf8");
 
 	const child = runChild(`
-		const { getWebSearchConfigDir, getWebSearchConfigPath } = await import(${JSON.stringify(utilsUrl)});
+		const { getWebAccessConfiguration } = await import(${JSON.stringify(configurationUrl)});
 		const { isGeminiApiAvailable } = await import(${JSON.stringify(geminiApiUrl)});
 		console.log(JSON.stringify({
-			dir: getWebSearchConfigDir(),
-			path: getWebSearchConfigPath(),
+			path: getWebAccessConfiguration().sourcePath,
 			available: isGeminiApiAvailable(),
 		}));
 	`, {
@@ -84,7 +84,6 @@ test("web-search config path uses XDG_CONFIG_HOME pi directory when agent dir is
 
 	assert.equal(child.status, 0, child.stderr);
 	assert.deepEqual(JSON.parse(child.stdout), {
-		dir: join(xdgDir, "pi"),
 		path: join(xdgDir, "pi", "web-search.json"),
 		available: true,
 	});
@@ -95,12 +94,14 @@ test("Gemini base URL and Cloudflare auth use env before config", async () => {
 	const agentDir = join(root, "agent-dir");
 	await mkdir(agentDir, { recursive: true });
 	await writeFile(join(agentDir, "web-search.json"), JSON.stringify({
+		geminiApiKey: "config-gemini-key",
 		geminiBaseUrl: "https://config.example.com/gemini/",
 		cloudflareApiKey: "config-cf-key",
 	}) + "\n", "utf8");
 
 	const child = runChild(`
 		const {
+			getApiKey,
 			getApiHost,
 			getVersionedApiBase,
 			buildKeyParam,
@@ -108,6 +109,7 @@ test("Gemini base URL and Cloudflare auth use env before config", async () => {
 			isGeminiApiAvailable,
 		} = await import(${JSON.stringify(geminiApiUrl)});
 		console.log(JSON.stringify({
+			apiKey: getApiKey(),
 			host: getApiHost(),
 			base: getVersionedApiBase(),
 			keyParam: buildKeyParam("gemini-key"),
@@ -119,18 +121,113 @@ test("Gemini base URL and Cloudflare auth use env before config", async () => {
 		XDG_CONFIG_HOME: undefined,
 		HOME: join(root, "home"),
 		USERPROFILE: join(root, "home"),
+		GEMINI_API_KEY: "env-gemini-key",
 		GOOGLE_GEMINI_BASE_URL: "https://gateway.ai.cloudflare.com/v1/account/gateway/google-ai-studio/",
 		CLOUDFLARE_API_KEY: "env-cf-key",
 	});
 
 	assert.equal(child.status, 0, child.stderr);
 	assert.deepEqual(JSON.parse(child.stdout), {
+		apiKey: "env-gemini-key",
 		host: "https://gateway.ai.cloudflare.com/v1/account/gateway/google-ai-studio",
 		base: "https://gateway.ai.cloudflare.com/v1/account/gateway/google-ai-studio/v1beta",
 		keyParam: "",
 		headers: { "cf-aig-authorization": "Bearer env-cf-key" },
 		available: true,
 	});
+});
+
+test("Gemini routing and browser settings use the current configuration snapshot", async () => {
+	const root = await mkdtemp(join(tmpdir(), "pi-web-access-gemini-current-config-"));
+	const agentDir = join(root, "agent-dir");
+	await mkdir(agentDir, { recursive: true });
+	const configPath = join(agentDir, "web-search.json");
+	await writeFile(configPath, JSON.stringify({
+		geminiApiKey: "initial-gemini-key",
+		geminiBaseUrl: "https://gateway.ai.cloudflare.com/v1/account/initial/google-ai-studio/",
+		cloudflareApiKey: "initial-cloudflare-key",
+		allowBrowserCookies: true,
+		chromeProfile: " Profile 7 ",
+	}) + "\n", "utf8");
+
+	const child = runChild(`
+		const { writeFileSync } = await import("node:fs");
+		const { getWebAccessConfiguration } = await import(${JSON.stringify(configurationUrl)});
+		getWebAccessConfiguration().current();
+		writeFileSync(${JSON.stringify(configPath)}, JSON.stringify({
+			geminiApiKey: "changed-gemini-key",
+			geminiBaseUrl: "https://changed.example.com",
+			cloudflareApiKey: "changed-cloudflare-key",
+			allowBrowserCookies: false,
+			chromeProfile: "Changed Profile",
+		}));
+		const api = await import(${JSON.stringify(geminiApiUrl)});
+		const browser = await import(${JSON.stringify(geminiWebConfigUrl)});
+		console.log(JSON.stringify({
+			apiKey: api.getApiKey(),
+			host: api.getApiHost(),
+			headers: api.buildAuthHeaders(),
+			cookieAccess: browser.isBrowserCookieAccessAllowed(),
+			profile: browser.getChromeProfileFromConfig(),
+		}));
+	`, {
+		PI_CODING_AGENT_DIR: agentDir,
+		XDG_CONFIG_HOME: undefined,
+		HOME: join(root, "home"),
+		USERPROFILE: join(root, "home"),
+	});
+
+	assert.equal(child.status, 0, child.stderr);
+	assert.deepEqual(JSON.parse(child.stdout), {
+		apiKey: "initial-gemini-key",
+		host: "https://gateway.ai.cloudflare.com/v1/account/initial/google-ai-studio",
+		headers: { "cf-aig-authorization": "Bearer initial-cloudflare-key" },
+		cookieAccess: true,
+		profile: "Profile 7",
+	});
+});
+
+test("Gemini search preserves legacy provider compatibility and configured model snapshot", async () => {
+	const root = await mkdtemp(join(tmpdir(), "pi-web-access-gemini-search-config-"));
+	const agentDir = join(root, "agent-dir");
+	await mkdir(agentDir, { recursive: true });
+	const configPath = join(agentDir, "web-search.json");
+	await writeFile(configPath, JSON.stringify({
+		searchProvider: "gemini",
+		searchModel: "gemini-initial-model",
+	}) + "\n", "utf8");
+
+	const child = runChild(`
+		const { writeFileSync } = await import("node:fs");
+		const { getWebAccessConfiguration } = await import(${JSON.stringify(configurationUrl)});
+		getWebAccessConfiguration().current();
+		writeFileSync(${JSON.stringify(configPath)}, JSON.stringify({
+			searchProvider: "brave",
+			searchModel: "gemini-changed-model",
+		}));
+		let capturedUrl = "";
+		globalThis.fetch = async (url) => {
+			capturedUrl = String(url);
+			return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "answer" }] } }] }), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			});
+		};
+		const { search } = await import(${JSON.stringify(geminiSearchUrl)});
+		const result = await search("current Gemini settings");
+		console.log(JSON.stringify({ provider: result.provider, capturedUrl }));
+	`, {
+		PI_CODING_AGENT_DIR: agentDir,
+		XDG_CONFIG_HOME: undefined,
+		HOME: join(root, "home"),
+		USERPROFILE: join(root, "home"),
+		GEMINI_API_KEY: "env-gemini-key",
+	});
+
+	assert.equal(child.status, 0, child.stderr);
+	const output = JSON.parse(child.stdout);
+	assert.equal(output.provider, "gemini");
+	assert.match(output.capturedUrl, /models\/gemini-initial-model:generateContent\?key=env-gemini-key$/);
 });
 
 test("Gemini API requests include role and gateway auth headers", async () => {

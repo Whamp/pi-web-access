@@ -22,7 +22,7 @@ export interface CuratorServerOptions {
 export interface CuratorServerCallbacks {
 	onSubmit: (payload: { selectedQueryIndices: number[]; summary?: string; summaryMeta?: SummaryMeta; rawResults?: boolean }) => void;
 	onCancel: (reason: "user" | "timeout" | "stale") => void;
-	onProviderChange: (provider: string) => void;
+	onProviderChange: (provider: string) => void | Promise<void>;
 	onAddSearch: (query: string, queryIndex: number, provider?: string) => Promise<{
 		answer: string;
 		results: Array<{ title: string; url: string; domain: string }>;
@@ -373,8 +373,13 @@ export function startCuratorServer(
 					sendJson(res, 400, { ok: false, error: `Unknown provider: ${provider}` });
 					return;
 				}
-				setImmediate(() => callbacks.onProviderChange(provider));
-				sendJson(res, 200, { ok: true });
+				try {
+					await callbacks.onProviderChange(provider);
+					sendJson(res, 200, { ok: true });
+				} catch (error) {
+					const message = error instanceof Error ? error.message : "Unable to save the provider preference.";
+					sendJson(res, 500, { ok: false, error: message });
+				}
 				return;
 			}
 

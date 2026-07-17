@@ -1,14 +1,13 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { resolve, extname, basename, join, dirname } from "node:path";
 import { activityMonitor } from "./activity.ts";
+import { DEFAULT_MEDIA_SETTINGS, type MediaSettings } from "./configuration.ts";
 import { isGeminiWebAvailable, queryWithCookies } from "./gemini-web.ts";
 import { queryGeminiApiWithVideo, getApiKey, API_BASE } from "./gemini-api.ts";
 import { extractHeadingTitle, type ExtractedContent, type ExtractOptions, type FrameResult } from "./extract.ts";
-import { readExecError, trimErrorText, mapFfmpegError, getWebSearchConfigPath } from "./utils.ts";
-
-const CONFIG_PATH = getWebSearchConfigPath();
+import { readExecError, trimErrorText, mapFfmpegError } from "./utils.ts";
 const UPLOAD_BASE = "https://generativelanguage.googleapis.com/upload/v1beta";
 
 const DEFAULT_VIDEO_PROMPT = `Extract the complete content of this video. Include:
@@ -43,63 +42,8 @@ interface VideoFileInfo {
 	sizeBytes: number;
 }
 
-interface VideoConfig {
-	enabled: boolean;
-	preferredModel: string;
-	maxSizeMB: number;
-}
-
-function normalizePreferredModel(value: unknown, fallback: string): string {
-	if (typeof value !== "string") return fallback;
-	const normalized = value.trim();
-	return normalized.length > 0 ? normalized : fallback;
-}
-
-function normalizeEnabled(value: unknown, fallback: boolean): boolean {
-	return typeof value === "boolean" ? value : fallback;
-}
-
-function normalizeMaxSizeMB(value: unknown, fallback: number): number {
-	if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
-	return value > 0 ? value : fallback;
-}
-
-const VIDEO_CONFIG_DEFAULTS: VideoConfig = {
-	enabled: true,
-	preferredModel: "gemini-3-flash-preview",
-	maxSizeMB: 50,
-};
-
-let cachedVideoConfig: VideoConfig | null = null;
-
-function loadVideoConfig(): VideoConfig {
-	if (cachedVideoConfig) return cachedVideoConfig;
-	if (!existsSync(CONFIG_PATH)) {
-		cachedVideoConfig = { ...VIDEO_CONFIG_DEFAULTS };
-		return cachedVideoConfig;
-	}
-
-	const rawText = readFileSync(CONFIG_PATH, "utf-8");
-	let raw: { video?: { enabled?: boolean; preferredModel?: string; maxSizeMB?: number } };
-	try {
-		raw = JSON.parse(rawText) as { video?: { enabled?: boolean; preferredModel?: string; maxSizeMB?: number } };
-	} catch (err) {
-		const message = err instanceof Error ? err.message : String(err);
-		throw new Error(`Failed to parse ${CONFIG_PATH}: ${message}`);
-	}
-
-	const v = raw.video ?? {};
-	cachedVideoConfig = {
-		enabled: normalizeEnabled(v.enabled, VIDEO_CONFIG_DEFAULTS.enabled),
-		preferredModel: normalizePreferredModel(v.preferredModel, VIDEO_CONFIG_DEFAULTS.preferredModel),
-		maxSizeMB: normalizeMaxSizeMB(v.maxSizeMB, VIDEO_CONFIG_DEFAULTS.maxSizeMB),
-	};
-	return cachedVideoConfig;
-}
-
-export function isVideoFile(input: string): VideoFileInfo | null {
-	const config = loadVideoConfig();
-	if (!config.enabled) return null;
+export function isVideoFile(input: string, settings: MediaSettings["video"] = DEFAULT_MEDIA_SETTINGS.video): VideoFileInfo | null {
+	if (!settings.enabled) return null;
 
 	const isFilePath = input.startsWith("/") || input.startsWith("./") || input.startsWith("../") || input.startsWith("file://");
 	if (!isFilePath) return null;
@@ -128,7 +72,7 @@ export function isVideoFile(input: string): VideoFileInfo | null {
 	}
 	if (!stat.isFile()) return null;
 
-	const maxBytes = config.maxSizeMB * 1024 * 1024;
+	const maxBytes = settings.maxSizeMB * 1024 * 1024;
 	if (stat.size > maxBytes) return null;
 
 	return { absolutePath, mimeType, sizeBytes: stat.size };
@@ -159,10 +103,10 @@ export async function extractVideo(
 	info: VideoFileInfo,
 	signal?: AbortSignal,
 	options?: ExtractOptions,
+	settings: MediaSettings["video"] = DEFAULT_MEDIA_SETTINGS.video,
 ): Promise<ExtractedContent | null> {
-	const config = loadVideoConfig();
 	const effectivePrompt = options?.prompt ?? DEFAULT_VIDEO_PROMPT;
-	const effectiveModel = options?.model ?? config.preferredModel;
+	const effectiveModel = options?.model ?? settings.preferredModel;
 	const displayName = basename(info.absolutePath);
 	const activityId = activityMonitor.logStart({ type: "fetch", url: `video:${displayName}` });
 

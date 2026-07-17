@@ -1,16 +1,20 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
 const extractorUrl = new URL("../extract.ts", import.meta.url).href;
+const configurationUrl = new URL("../configuration.ts", import.meta.url).href;
 
 test("YouTube extraction surfaces Gemini API errors", async () => {
 	const home = await mkdtemp(join(tmpdir(), "pi-web-access-youtube-errors-"));
+	const configPath = join(home, "web-search.json");
+	await writeFile(configPath, JSON.stringify({ youtube: { preferredModel: "configured-youtube-model" } }));
 	const env = {
 		...process.env,
+		TEST_WEB_ACCESS_CONFIG: configPath,
 		HOME: home,
 		USERPROFILE: home,
 		GEMINI_API_KEY: "test-gemini-key",
@@ -20,7 +24,7 @@ test("YouTube extraction surfaces Gemini API errors", async () => {
 	delete env.FEYNMAN_ALLOW_BROWSER_COOKIES;
 
 	const child = spawnSync(process.execPath, ["--input-type=module"], {
-		input: buildChildScript(extractorUrl),
+		input: buildChildScript(extractorUrl, configurationUrl),
 		encoding: "utf8",
 		env,
 	});
@@ -28,6 +32,7 @@ test("YouTube extraction surfaces Gemini API errors", async () => {
 	assert.equal(child.status, 0, child.stderr || child.stdout);
 	const result = JSON.parse(child.stdout);
 	assert.match(result.error, /Gemini API error 503/);
+	assert.match(result.requestUrl, /\/models\/configured-youtube-model:generateContent/);
 	assert.doesNotMatch(result.error, /Sign into Google in Chrome/);
 });
 
@@ -56,7 +61,7 @@ test("YouTube thumbnail retrieval settles on parent cancellation", async () => {
 	assert.match(result.error, /abort/i);
 });
 
-function buildChildScript(moduleUrl) {
+function buildChildScript(moduleUrl, configModuleUrl) {
 	return `
 		process.on("uncaughtException", (error) => {
 			console.error(error?.stack || error);
@@ -67,9 +72,11 @@ function buildChildScript(moduleUrl) {
 			process.exit(1);
 		});
 
+		let requestUrl = "";
 		globalThis.fetch = async (input) => {
 			const url = String(input);
 			if (url.startsWith("https://generativelanguage.googleapis.com/")) {
+				requestUrl = url;
 				return new Response(JSON.stringify({ error: { message: "model overloaded" } }), {
 					status: 503,
 					statusText: "Service Unavailable",
@@ -80,11 +87,13 @@ function buildChildScript(moduleUrl) {
 		};
 
 		const { extractContent } = await import(${JSON.stringify(moduleUrl)});
+		const { createWebAccessConfiguration } = await import(${JSON.stringify(configModuleUrl)});
+		const media = createWebAccessConfiguration({ sourcePath: process.env.TEST_WEB_ACCESS_CONFIG }).current();
 		// Inject DNS so SSRF validation never depends on real resolution (which a
 		// local fake-IP/TUN proxy would map into a blocked reserved range).
 		const lookup = async () => [{ address: "93.184.216.34", family: 4 }];
-		const result = await extractContent("https://www.youtube.com/watch?v=dQw4w9WgXcQ", undefined, { lookup });
-		console.log(JSON.stringify(result));
+		const result = await extractContent("https://www.youtube.com/watch?v=dQw4w9WgXcQ", undefined, { lookup, media });
+		console.log(JSON.stringify({ ...result, requestUrl }));
 	`;
 }
 

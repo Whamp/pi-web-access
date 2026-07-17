@@ -1,22 +1,16 @@
-import { existsSync, readFileSync } from "node:fs";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { activityMonitor } from "./activity.ts";
 import type { SearchOptions, SearchProviderAdapter, SearchResponse, SearchResult } from "./search-provider.ts";
-import { getWebSearchConfigPath } from "./utils.ts";
+import { getWebAccessConfiguration, type WebAccessSettings } from "./configuration.ts";
 
 const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
 const CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses";
-const CONFIG_PATH = getWebSearchConfigPath();
 const SEARCH_TIMEOUT_MS = 60_000;
 
 const AUTH_MODEL_CANDIDATES = [
 	{ provider: "openai-codex", models: ["gpt-5.4", "gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.2", "gpt-5.2-codex"] },
 	{ provider: "openai", models: ["gpt-5.4", "gpt-5.2", "gpt-4.1-mini", "gpt-4o"] },
 ] as const;
-
-interface WebSearchConfig {
-	openaiApiKey?: unknown;
-}
 
 interface OpenAIAuth {
 	provider: "openai-codex" | "openai";
@@ -28,25 +22,6 @@ interface OpenAIAuth {
 interface NormalizedDomainFilters {
 	allowedDomains?: string[];
 	blockedDomains?: string[];
-}
-
-let cachedConfig: WebSearchConfig | null = null;
-
-function loadConfig(): WebSearchConfig {
-	if (cachedConfig) return cachedConfig;
-	if (!existsSync(CONFIG_PATH)) {
-		cachedConfig = {};
-		return cachedConfig;
-	}
-
-	const raw = readFileSync(CONFIG_PATH, "utf-8");
-	try {
-		cachedConfig = JSON.parse(raw) as WebSearchConfig;
-		return cachedConfig;
-	} catch (err) {
-		const message = err instanceof Error ? err.message : String(err);
-		throw new Error(`Failed to parse ${CONFIG_PATH}: ${message}`);
-	}
 }
 
 function normalizeApiKey(value: unknown): string | null {
@@ -115,7 +90,7 @@ function extractAccountId(token: string): string | undefined {
 	return typeof id === "string" && id.trim().length > 0 ? id.trim() : undefined;
 }
 
-export async function resolveOpenAIAuth(ctx?: ExtensionContext, signal?: AbortSignal): Promise<OpenAIAuth | undefined> {
+export async function resolveOpenAIAuth(ctx?: ExtensionContext, signal?: AbortSignal, settings: Pick<WebAccessSettings, "openaiApiKey"> = {}): Promise<OpenAIAuth | undefined> {
 	signal?.throwIfAborted();
 	if (ctx) {
 		const { getModel } = await import("@earendil-works/pi-ai/compat");
@@ -141,14 +116,14 @@ export async function resolveOpenAIAuth(ctx?: ExtensionContext, signal?: AbortSi
 		}
 	}
 
-	const apiKey = normalizeApiKey(process.env.OPENAI_API_KEY) ?? normalizeApiKey(loadConfig().openaiApiKey);
+	const apiKey = normalizeApiKey(process.env.OPENAI_API_KEY) ?? normalizeApiKey(settings.openaiApiKey);
 	return apiKey
 		? { provider: "openai", apiKey, model: "gpt-5.4", headers: {} }
 		: undefined;
 }
 
-export async function isOpenAISearchAvailable(ctx?: ExtensionContext, signal?: AbortSignal): Promise<boolean> {
-	return !!(await resolveOpenAIAuth(ctx, signal));
+export async function isOpenAISearchAvailable(ctx?: ExtensionContext, signal?: AbortSignal, settings: Pick<WebAccessSettings, "openaiApiKey"> = {}): Promise<boolean> {
+	return !!(await resolveOpenAIAuth(ctx, signal, settings));
 }
 
 function buildInstructions(options: SearchOptions): string {
@@ -326,13 +301,14 @@ export async function searchWithOpenAI(
 	query: string,
 	options: SearchOptions = {},
 	ctx?: ExtensionContext,
+	settings: Pick<WebAccessSettings, "openaiApiKey"> = {},
 ): Promise<SearchResponse> {
-	const auth = await resolveOpenAIAuth(ctx, options.signal);
+	const auth = await resolveOpenAIAuth(ctx, options.signal, settings);
 	if (!auth) {
 		throw new Error(
 			"OpenAI web search unavailable. Either:\n" +
 			"  1. Use /login to sign in with a Codex subscription\n" +
-			`  2. Create ${CONFIG_PATH} with { "openaiApiKey": "your-key" }\n` +
+			`  2. Create ${getWebAccessConfiguration().sourcePath} with { "openaiApiKey": "your-key" }\n` +
 			"  3. Set OPENAI_API_KEY environment variable",
 		);
 	}
@@ -401,11 +377,15 @@ export async function searchWithOpenAI(
 	}
 }
 
-export const openAISearchProvider: SearchProviderAdapter<"openai"> = {
-	name: "openai",
-	label: "OpenAI",
-	eligibility: async ({ extensionContext, signal }) => await isOpenAISearchAvailable(extensionContext, signal)
-		? { eligible: true }
-		: { eligible: false, reason: "OpenAI web search credentials are not configured." },
-	search: ({ query, options }) => searchWithOpenAI(query, options, options.extensionContext),
-};
+/** Creates an OpenAI adapter that captures persistent credentials while preserving login and environment precedence. */
+export function createOpenAISearchProvider(settings: Pick<WebAccessSettings, "openaiApiKey">): SearchProviderAdapter<"openai"> {
+	return {
+		name: "openai", label: "OpenAI",
+		eligibility: async ({ extensionContext, signal }) => await isOpenAISearchAvailable(extensionContext, signal, settings)
+			? { eligible: true }
+			: { eligible: false, reason: "OpenAI web search credentials are not configured." },
+		search: ({ query, options }) => searchWithOpenAI(query, options, options.extensionContext, settings),
+	};
+}
+
+export const openAISearchProvider = createOpenAISearchProvider({});

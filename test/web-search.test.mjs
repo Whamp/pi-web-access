@@ -1,7 +1,16 @@
 import assert from "node:assert/strict";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import fc from "fast-check";
 import { test } from "node:test";
-import { AutoSearchError, createWebSearch, ProviderIneligibleError } from "../web-search.ts";
+import { createWebAccessConfiguration } from "../configuration.ts";
+import { AutoSearchError, createConfiguredWebSearch, createWebSearch, ProviderIneligibleError } from "../web-search.ts";
+
+async function temporaryConfigPath() {
+	const directory = await mkdtemp(join(tmpdir(), "pi-web-access-web-search-"));
+	return join(directory, "web-search.json");
+}
 
 const PROVIDER_NAMES = ["openai", "exa", "brave", "parallel", "tavily", "perplexity", "gemini"];
 
@@ -38,6 +47,89 @@ function createFixture(overrides = {}) {
 	));
 	return { callLog, eligibilityLog, providers, webSearch: createWebSearch(providers) };
 }
+
+test("configured Gemini search captures its supplied credentials and model", async () => {
+	const sourcePath = await temporaryConfigPath();
+	await writeFile(sourcePath, JSON.stringify({ geminiApiKey: "captured-key", searchModel: "captured-model" }));
+	const settings = createWebAccessConfiguration({ sourcePath }).current();
+	const previousFetch = globalThis.fetch;
+	const previousEnvironment = {
+		geminiApiKey: process.env.GEMINI_API_KEY,
+		geminiBaseUrl: process.env.GOOGLE_GEMINI_BASE_URL,
+		cloudflareApiKey: process.env.CLOUDFLARE_API_KEY,
+		piCodingAgentDir: process.env.PI_CODING_AGENT_DIR,
+	};
+	const globalDirectory = await mkdtemp(join(tmpdir(), "pi-web-access-global-configuration-"));
+	delete process.env.GEMINI_API_KEY;
+	delete process.env.GOOGLE_GEMINI_BASE_URL;
+	delete process.env.CLOUDFLARE_API_KEY;
+	process.env.PI_CODING_AGENT_DIR = globalDirectory;
+	let requestedUrl;
+	globalThis.fetch = async (url) => {
+		requestedUrl = String(url);
+		return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "answer" }] } }] }), {
+			status: 200,
+			headers: { "content-type": "application/json" },
+		});
+	};
+	try {
+		const webSearch = createConfiguredWebSearch(settings);
+		assert.deepEqual((await webSearch.eligibility()).gemini, { eligible: true });
+		const result = await webSearch.search("query", { provider: "gemini" });
+		assert.equal(result.provider, "gemini");
+		assert.match(requestedUrl, /\/models\/captured-model:generateContent\?key=captured-key$/);
+	} finally {
+		globalThis.fetch = previousFetch;
+		for (const [name, value] of [
+			["GEMINI_API_KEY", previousEnvironment.geminiApiKey],
+			["GOOGLE_GEMINI_BASE_URL", previousEnvironment.geminiBaseUrl],
+			["CLOUDFLARE_API_KEY", previousEnvironment.cloudflareApiKey],
+			["PI_CODING_AGENT_DIR", previousEnvironment.piCodingAgentDir],
+		]) {
+			if (value === undefined) delete process.env[name]; else process.env[name] = value;
+		}
+	}
+});
+
+test("configured Gemini search captures supplied gateway routing and authentication", async () => {
+	const sourcePath = await temporaryConfigPath();
+	await writeFile(sourcePath, JSON.stringify({
+		geminiBaseUrl: "https://gateway.ai.cloudflare.com/v1/account/gateway/google-ai-studio",
+		cloudflareApiKey: "captured-cloudflare-key",
+		searchModel: "captured-gateway-model",
+	}));
+	const settings = createWebAccessConfiguration({ sourcePath }).current();
+	const previousFetch = globalThis.fetch;
+	const previousEnvironment = {
+		geminiApiKey: process.env.GEMINI_API_KEY,
+		geminiBaseUrl: process.env.GOOGLE_GEMINI_BASE_URL,
+		cloudflareApiKey: process.env.CLOUDFLARE_API_KEY,
+	};
+	delete process.env.GEMINI_API_KEY;
+	delete process.env.GOOGLE_GEMINI_BASE_URL;
+	delete process.env.CLOUDFLARE_API_KEY;
+	let request;
+	globalThis.fetch = async (url, init) => {
+		request = { url: String(url), headers: init.headers };
+		return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "answer" }] } }] }), { status: 200 });
+	};
+	try {
+		const webSearch = createConfiguredWebSearch(settings);
+		assert.deepEqual((await webSearch.eligibility()).gemini, { eligible: true });
+		await webSearch.search("query", { provider: "gemini" });
+		assert.match(request.url, /gateway\.ai\.cloudflare\.com.*\/v1beta\/models\/captured-gateway-model:generateContent$/);
+		assert.equal(request.headers["cf-aig-authorization"], "Bearer captured-cloudflare-key");
+	} finally {
+		globalThis.fetch = previousFetch;
+		for (const [name, value] of [
+			["GEMINI_API_KEY", previousEnvironment.geminiApiKey],
+			["GOOGLE_GEMINI_BASE_URL", previousEnvironment.geminiBaseUrl],
+			["CLOUDFLARE_API_KEY", previousEnvironment.cloudflareApiKey],
+		]) {
+			if (value === undefined) delete process.env[name]; else process.env[name] = value;
+		}
+	}
+});
 
 test("eligibility reports every provider without executing a search", async () => {
 	const { providers, webSearch } = createFixture({

@@ -243,7 +243,13 @@ Press **Ctrl+Shift+W** to toggle the request activity monitor. Shortcuts are con
 
 ## Configuration
 
-Configuration lives at `~/.pi/web-search.json`, or under `PI_CODING_AGENT_DIR` / `XDG_CONFIG_HOME/pi` when set. Every field is optional.
+Web Access resolves `web-search.json` in this order:
+
+1. `PI_CODING_AGENT_DIR/web-search.json`
+2. `XDG_CONFIG_HOME/pi/web-search.json`
+3. `~/.pi/web-search.json`
+
+Every field is optional. If the file is missing, Web Access uses the defaults shown below. Web Access loads the file once when the extension starts. Malformed JSON or an invalid known field stops extension startup and names the file and field. Unknown fields produce one key-only warning, remain preserved when Web Access saves a supported setting, and do not block startup.
 
 ```json
 {
@@ -251,16 +257,8 @@ Configuration lives at `~/.pi/web-search.json`, or under `PI_CODING_AGENT_DIR` /
   "webSearch": {
     "enabled": true
   },
-  "openaiApiKey": "sk-...",
-  "braveApiKey": "BSA_...",
-  "exaApiKey": "exa-...",
-  "parallelApiKey": "...",
-  "tavilyApiKey": "tvly-...",
-  "perplexityApiKey": "pplx-...",
-  "geminiApiKey": "AIza...",
   "allowBrowserCookies": false,
-  "searchModel": "gemini-2.5-flash",
-  "summaryModel": "openai-codex/gpt-5.3-codex-spark",
+  "searchModel": "gemini-3-flash-preview",
   "workflow": "none",
   "curatorTimeoutSeconds": 20,
   "githubClone": {
@@ -283,12 +281,16 @@ Configuration lives at `~/.pi/web-search.json`, or under `PI_CODING_AGENT_DIR` /
     "activity": "ctrl+shift+w"
   },
   "ssrf": {
-    "allowRanges": ["198.18.0.0/15"]
+    "allowRanges": []
   }
 }
 ```
 
+The same file also supports optional `openaiApiKey`, `braveApiKey`, `exaApiKey`, `parallelApiKey`, `tavilyApiKey`, `perplexityApiKey`, `geminiApiKey`, `geminiBaseUrl`, `cloudflareApiKey`, `chromeProfile`, and `summaryModel` fields. The legacy `searchProvider` field remains accepted for compatibility; `provider` is the current default-provider field. All credentials and `summaryModel` are unset by default.
+
 Set `webSearch.enabled` to `false` to unregister the `web_search` tool while keeping content-fetching tools available.
+
+Changes saved inside Web Access, such as a Search Curator provider change, take effect for work started after the save completes. A failed save leaves the previous file and runtime settings active. Manual file edits are not watched; restart Pi to load them.
 
 Environment variables override matching configuration fields:
 

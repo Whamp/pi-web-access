@@ -1,24 +1,62 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { test } from "node:test";
 
-const indexSrc = readFileSync(new URL("../index.ts", import.meta.url), "utf8");
-const readmeSrc = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+const codingAgentEntry = fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"));
+const loaderUrl = pathToFileURL(join(dirname(codingAgentEntry), "core/extensions/loader.js"));
+const { createExtensionRuntime, loadExtensionsCached } = await import(loaderUrl.href);
+const extensionPath = fileURLToPath(new URL("../index.ts", import.meta.url));
+const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 
-test("web_search registration is gated by webSearch.enabled", () => {
-	assert.match(indexSrc, /webSearch\?: \{\n\t\tenabled\?: boolean;\n\t\};/);
-	assert.match(indexSrc, /if \(initConfig\.webSearch\?\.enabled !== false\) pi\.registerTool\(\{\n\t\tname: "web_search"/);
+async function loadRegisteredExtension(contents) {
+	const configDir = await mkdtemp(join(tmpdir(), "pi-web-access-registration-"));
+	if (contents !== undefined) await writeFile(join(configDir, "web-search.json"), contents);
+	process.env.PI_CODING_AGENT_DIR = configDir;
+	const runtime = createExtensionRuntime();
+	const loaded = await loadExtensionsCached([extensionPath], configDir, undefined, runtime);
+	return { loaded };
+}
+
+test.afterEach(() => {
+	if (originalAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+	else process.env.PI_CODING_AGENT_DIR = originalAgentDir;
 });
 
-test("fetch tools remain registered outside the web_search gate", () => {
-	const gateIndex = indexSrc.indexOf("if (initConfig.webSearch?.enabled !== false)");
-	const fetchIndex = indexSrc.indexOf('name: "fetch_content"');
-	assert.ok(gateIndex >= 0, "web_search gate not found");
-	assert.ok(fetchIndex > gateIndex, "fetch_content registration should remain after web_search gate");
-	assert.match(indexSrc, /\n\t}\);\n\n\tpi\.registerTool\(\{\n\t\tname: "fetch_content"/);
+test("webSearch.enabled false omits only the registered web_search tool", async () => {
+	const { loaded } = await loadRegisteredExtension(JSON.stringify({ webSearch: { enabled: false } }));
+	assert.deepEqual(loaded.errors, []);
+	const extension = loaded.extensions[0];
+	assert.ok(extension);
+	assert.equal(extension.tools.has("web_search"), false);
+	assert.equal(extension.tools.has("fetch_content"), true);
+	assert.equal(extension.tools.has("get_search_content"), true);
 });
 
-test("README documents webSearch.enabled", () => {
-	assert.match(readmeSrc, /"webSearch": \{\n    "enabled": true\n  \}/);
-	assert.match(readmeSrc, /webSearch\.enabled` to `false` to unregister the `web_search` tool/);
+test("missing configuration registers web_search with default shortcuts", async () => {
+	const { loaded } = await loadRegisteredExtension(undefined);
+	assert.deepEqual(loaded.errors, []);
+	const extension = loaded.extensions[0];
+	assert.ok(extension.tools.has("web_search"));
+	assert.ok(extension.shortcuts.has("ctrl+shift+s"));
+	assert.ok(extension.shortcuts.has("ctrl+shift+w"));
+});
+
+test("custom shortcuts are registered from the startup settings", async () => {
+	const { loaded } = await loadRegisteredExtension(JSON.stringify({ shortcuts: { curate: "ctrl+x", activity: "ctrl+y" } }));
+	assert.deepEqual(loaded.errors, []);
+	const extension = loaded.extensions[0];
+	assert.ok(extension.shortcuts.has("ctrl+x"));
+	assert.ok(extension.shortcuts.has("ctrl+y"));
+	assert.equal(extension.shortcuts.has("ctrl+shift+s"), false);
+});
+
+test("invalid configuration stops extension registration", async () => {
+	const { loaded } = await loadRegisteredExtension(JSON.stringify({ webSearch: { enabled: "no" } }));
+	assert.equal(loaded.extensions.length, 0);
+	assert.equal(loaded.errors.length, 1);
+	assert.match(loaded.errors[0].error, /webSearch\.enabled must be a boolean/);
+	assert.match(loaded.errors[0].error, /web-search\.json/);
 });

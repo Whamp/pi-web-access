@@ -1,17 +1,11 @@
-import { existsSync, readFileSync } from "node:fs";
 import { activityMonitor } from "./activity.ts";
 import type { ExtractedContent } from "./extract.ts";
 import type { SearchOptions, SearchProviderAdapter, SearchResponse } from "./search-provider.ts";
-import { getWebSearchConfigPath } from "./utils.ts";
+import type { WebAccessSettings } from "./configuration.ts";
 
 const EXA_ANSWER_URL = "https://api.exa.ai/answer";
 const EXA_SEARCH_URL = "https://api.exa.ai/search";
 const EXA_MCP_URL = "https://mcp.exa.ai/mcp";
-const CONFIG_PATH = getWebSearchConfigPath();
-
-interface WebSearchConfig {
-	exaApiKey?: unknown;
-}
 
 interface ExaAnswerResponse {
 	answer?: string;
@@ -49,33 +43,14 @@ export interface ExaSearchOptions extends SearchOptions {
 
 type McpParsedResult = { title: string; url: string; content: string };
 
-let cachedConfig: WebSearchConfig | null = null;
-
-function loadConfig(): WebSearchConfig {
-	if (cachedConfig) return cachedConfig;
-	if (!existsSync(CONFIG_PATH)) {
-		cachedConfig = {};
-		return cachedConfig;
-	}
-
-	const raw = readFileSync(CONFIG_PATH, "utf-8");
-	try {
-		cachedConfig = JSON.parse(raw) as WebSearchConfig;
-		return cachedConfig;
-	} catch (err) {
-		const message = err instanceof Error ? err.message : String(err);
-		throw new Error(`Failed to parse ${CONFIG_PATH}: ${message}`);
-	}
-}
-
 function normalizeApiKey(value: unknown): string | null {
 	if (typeof value !== "string") return null;
 	const normalized = value.trim();
 	return normalized.length > 0 ? normalized : null;
 }
 
-function getApiKey(): string | null {
-	return normalizeApiKey(process.env.EXA_API_KEY) ?? normalizeApiKey(loadConfig().exaApiKey);
+function getApiKey(settings: Pick<WebAccessSettings, "exaApiKey">): string | null {
+	return normalizeApiKey(process.env.EXA_API_KEY) ?? normalizeApiKey(settings.exaApiKey);
 }
 
 function requestSignal(signal?: AbortSignal): AbortSignal {
@@ -358,12 +333,12 @@ export function isExaAvailable(): boolean {
 	return true;
 }
 
-export function hasExaApiKey(): boolean {
-	return !!getApiKey();
+export function hasExaApiKey(settings: Pick<WebAccessSettings, "exaApiKey"> = {}): boolean {
+	return !!getApiKey(settings);
 }
 
-export async function searchWithExa(query: string, options: ExaSearchOptions = {}): Promise<ExaSearchResult> {
-	const apiKey = getApiKey();
+export async function searchWithExa(query: string, options: ExaSearchOptions = {}, settings: Pick<WebAccessSettings, "exaApiKey"> = {}): Promise<ExaSearchResult> {
+	const apiKey = getApiKey(settings);
 	if (!apiKey) {
 		return searchWithExaMcp(query, options);
 	}
@@ -453,13 +428,17 @@ export async function searchWithExa(query: string, options: ExaSearchOptions = {
 	}
 }
 
-export const exaSearchProvider: SearchProviderAdapter<"exa"> = {
-	name: "exa",
-	label: "Exa",
-	eligibility: () => ({ eligible: true }),
-	search: async ({ query, options }) => {
-		const result = await searchWithExa(query, options);
-		if (!result) throw new Error("Exa search returned no results.");
-		return result;
-	},
-};
+/** Creates an Exa adapter that captures persistent credentials while preserving environment precedence. */
+export function createExaSearchProvider(settings: Pick<WebAccessSettings, "exaApiKey">): SearchProviderAdapter<"exa"> {
+	return {
+		name: "exa", label: "Exa",
+		eligibility: () => ({ eligible: true }),
+		search: async ({ query, options }) => {
+			const result = await searchWithExa(query, options, settings);
+			if (!result) throw new Error("Exa search returned no results.");
+			return result;
+		},
+	};
+}
+
+export const exaSearchProvider = createExaSearchProvider({});

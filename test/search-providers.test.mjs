@@ -37,6 +37,37 @@ function runChild(script, env) {
 	});
 }
 
+test("Brave provider uses persistent credentials and preserves environment precedence", async () => {
+	const home = await mkdtemp(join(tmpdir(), "pi-web-access-brave-config-"));
+	const child = runChild(`
+		const { createWebAccessConfiguration } = await import(new URL("../configuration.ts", ${JSON.stringify(import.meta.url)}));
+		const { createBraveSearchProvider } = await import(${JSON.stringify(braveModuleUrl)});
+		const { writeFileSync } = await import("node:fs");
+		writeFileSync(${JSON.stringify(join("PLACEHOLDER", "web-search.json"))}.replace("PLACEHOLDER", process.env.PI_CODING_AGENT_DIR), JSON.stringify({ braveApiKey: "persistent-brave-key" }));
+		const settings = createWebAccessConfiguration().current();
+		const tokens = [];
+		globalThis.fetch = async (_url, init) => {
+			tokens.push(init.headers["X-Subscription-Token"]);
+			return new Response(JSON.stringify({ web: { results: [] } }), { status: 200 });
+		};
+		const provider = createBraveSearchProvider(settings);
+		await provider.search({ query: "persistent", options: {} });
+		process.env.BRAVE_API_KEY = "environment-brave-key";
+		await provider.search({ query: "environment", options: {} });
+		console.log(JSON.stringify({ tokens, eligibility: await provider.eligibility({}) }));
+	`, {
+		HOME: home,
+		USERPROFILE: home,
+		PI_CODING_AGENT_DIR: home,
+	});
+
+	assert.equal(child.status, 0, child.stderr);
+	assert.deepEqual(JSON.parse(child.stdout.trim()), {
+		tokens: ["persistent-brave-key", "environment-brave-key"],
+		eligibility: { eligible: true },
+	});
+});
+
 test("Brave search applies domain filters in the query and returned results", async () => {
 	const home = await mkdtemp(join(tmpdir(), "pi-web-access-brave-"));
 	const child = runChild(`
@@ -102,7 +133,11 @@ test("Tavily search uses bearer auth and maps filters/content", async () => {
 			}), { status: 200, headers: { "content-type": "application/json" } });
 		};
 
-		const { tavilySearchProvider } = await import(${JSON.stringify(tavilyModuleUrl)});
+		const { writeFileSync } = await import("node:fs");
+		writeFileSync(process.env.PI_CODING_AGENT_DIR + "/web-search.json", JSON.stringify({ tavilyApiKey: "persistent-tavily-key" }));
+		const { createWebAccessConfiguration } = await import(new URL("../configuration.ts", ${JSON.stringify(import.meta.url)}));
+		const { createTavilySearchProvider } = await import(${JSON.stringify(tavilyModuleUrl)});
+		const tavilySearchProvider = createTavilySearchProvider(createWebAccessConfiguration().current());
 		const result = await tavilySearchProvider.search({ query: "tavily search docs", options: {
 			domainFilter: ["https://docs.tavily.com/search", "-reddit.com"],
 			recencyFilter: "week",
@@ -113,13 +148,13 @@ test("Tavily search uses bearer auth and maps filters/content", async () => {
 	`, {
 		HOME: home,
 		USERPROFILE: home,
-		TAVILY_API_KEY: "tvly-test-key",
+		PI_CODING_AGENT_DIR: home,
 	});
 
 	assert.equal(child.status, 0, child.stderr);
 	const output = JSON.parse(child.stdout.trim());
 	assert.equal(output.capturedUrl, "https://api.tavily.com/search");
-	assert.equal(output.capturedHeaders.Authorization, "Bearer tvly-test-key");
+	assert.equal(output.capturedHeaders.Authorization, "Bearer persistent-tavily-key");
 	assert.deepEqual(output.capturedBody, {
 		query: "tavily search docs",
 		search_depth: "basic",
@@ -154,7 +189,9 @@ test("Exa direct API key ignores full legacy usage counter", async () => {
 			}), { status: 200, headers: { "content-type": "application/json" } });
 		};
 
-		const { exaSearchProvider } = await import(${JSON.stringify(exaModuleUrl)});
+		const { createWebAccessConfiguration } = await import(new URL("../configuration.ts", ${JSON.stringify(import.meta.url)}));
+		const { createExaSearchProvider } = await import(${JSON.stringify(exaModuleUrl)});
+		const exaSearchProvider = createExaSearchProvider(createWebAccessConfiguration().current());
 		const available = (await exaSearchProvider.eligibility({})).eligible;
 		const result = await exaSearchProvider.search({ query: "paid exa query", options: {} });
 		const usage = JSON.parse(readFileSync(dir + "/exa-usage.json", "utf8"));
@@ -215,7 +252,11 @@ test("OpenAI search requires web_search and maps domain filters", async () => {
 			}), { status: 200, headers: { "content-type": "application/json" } });
 		};
 
-		const { openAISearchProvider } = await import(${JSON.stringify(openaiModuleUrl)});
+		const { writeFileSync } = await import("node:fs");
+		writeFileSync(process.env.PI_CODING_AGENT_DIR + "/web-search.json", JSON.stringify({ openaiApiKey: "persistent-openai-key" }));
+		const { createWebAccessConfiguration } = await import(new URL("../configuration.ts", ${JSON.stringify(import.meta.url)}));
+		const { createOpenAISearchProvider } = await import(${JSON.stringify(openaiModuleUrl)});
+		const openAISearchProvider = createOpenAISearchProvider(createWebAccessConfiguration().current());
 		const result = await openAISearchProvider.search({ query: "latest docs", options: {
 			domainFilter: ["https://openai.com/docs", "-reddit.com"],
 			numResults: 3,
@@ -230,13 +271,13 @@ test("OpenAI search requires web_search and maps domain filters", async () => {
 	`, {
 		HOME: home,
 		USERPROFILE: home,
-		OPENAI_API_KEY: "sk-test-key",
+		PI_CODING_AGENT_DIR: home,
 	});
 
 	assert.equal(child.status, 0, child.stderr);
 	const output = JSON.parse(child.stdout.trim());
 	assert.equal(output.url, "https://api.openai.com/v1/responses");
-	assert.equal(output.authorization, "Bearer sk-test-key");
+	assert.equal(output.authorization, "Bearer persistent-openai-key");
 	assert.equal(output.body.tool_choice, "required");
 	assert.deepEqual(output.body.include, ["web_search_call.action.sources"]);
 	assert.deepEqual(output.body.tools[0].filters, {
@@ -289,18 +330,22 @@ test("Perplexity provider maps one mocked search request and response", async ()
 				citations: [{ title: "Perplexity Docs", url: "https://docs.perplexity.ai" }],
 			}), { status: 200, headers: { "content-type": "application/json" } });
 		};
-		const { perplexitySearchProvider } = await import(${JSON.stringify(perplexityModuleUrl)});
+		const { writeFileSync } = await import("node:fs");
+		writeFileSync(process.env.PI_CODING_AGENT_DIR + "/web-search.json", JSON.stringify({ perplexityApiKey: "persistent-perplexity-key" }));
+		const { createWebAccessConfiguration } = await import(new URL("../configuration.ts", ${JSON.stringify(import.meta.url)}));
+		const { createPerplexitySearchProvider } = await import(${JSON.stringify(perplexityModuleUrl)});
+		const perplexitySearchProvider = createPerplexitySearchProvider(createWebAccessConfiguration().current());
 		const result = await perplexitySearchProvider.search({ query: "perplexity docs", options: { recencyFilter: "month" } });
 		console.log(JSON.stringify({ capturedHeaders, capturedBody, result }));
 	`, {
 		HOME: home,
 		USERPROFILE: home,
-		PERPLEXITY_API_KEY: "perplexity-test-key",
+		PI_CODING_AGENT_DIR: home,
 	});
 
 	assert.equal(child.status, 0, child.stderr);
 	const output = JSON.parse(child.stdout.trim());
-	assert.equal(output.capturedHeaders.Authorization, "Bearer perplexity-test-key");
+	assert.equal(output.capturedHeaders.Authorization, "Bearer persistent-perplexity-key");
 	assert.equal(output.capturedBody.search_recency_filter, "month");
 	assert.equal(output.result.answer, "Perplexity answer");
 	assert.deepEqual(output.result.results, [{ title: "Perplexity Docs", url: "https://docs.perplexity.ai", snippet: "" }]);
@@ -336,6 +381,41 @@ test("Gemini provider keeps API to Web behavior inside one logical attempt", asy
 	assert.match(output.capturedUrl, /generativelanguage\.googleapis\.com/);
 	assert.equal(output.result.answer, "Gemini answer");
 	assert.deepEqual(output.result.results, [{ title: "Gemini Source", url: "https://example.com/gemini", snippet: "" }]);
+});
+
+test("configured provider adapters preserve missing-credential errors", async () => {
+	const home = await mkdtemp(join(tmpdir(), "pi-web-access-provider-errors-"));
+	const child = runChild(`
+		const modules = await Promise.all([
+			import(${JSON.stringify(openaiModuleUrl)}),
+			import(${JSON.stringify(braveModuleUrl)}),
+			import(${JSON.stringify(parallelModuleUrl)}),
+			import(${JSON.stringify(tavilyModuleUrl)}),
+			import(${JSON.stringify(perplexityModuleUrl)}),
+		]);
+		const providers = [
+			modules[0].createOpenAISearchProvider({}),
+			modules[1].createBraveSearchProvider({}),
+			modules[2].createParallelSearchProvider({}),
+			modules[3].createTavilySearchProvider({}),
+			modules[4].createPerplexitySearchProvider({}),
+		];
+		const errors = {};
+		for (const provider of providers) {
+			try { await provider.search({ query: "missing", options: {} }); }
+			catch (error) { errors[provider.name] = error.message.split("\\n")[0]; }
+		}
+		console.log(JSON.stringify(errors));
+	`, { HOME: home, USERPROFILE: home, PI_CODING_AGENT_DIR: home });
+
+	assert.equal(child.status, 0, child.stderr);
+	assert.deepEqual(JSON.parse(child.stdout.trim()), {
+		openai: "OpenAI web search unavailable. Either:",
+		brave: "Brave Search API key not found. Either:",
+		parallel: "Parallel API key not found. Either:",
+		tavily: "Tavily API key not found. Either:",
+		perplexity: "Perplexity API key not found. Either:",
+	});
 });
 
 test("provider objects report eligibility and provider-specific ineligibility reasons", async () => {

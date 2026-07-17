@@ -1,5 +1,5 @@
-import { existsSync, readFileSync } from "node:fs";
 import { activityMonitor } from "./activity.ts";
+import { getWebAccessConfiguration, type WebAccessSettings } from "./configuration.ts";
 import {
 	getApiKey,
 	getVersionedApiBase,
@@ -7,7 +7,6 @@ import {
 	buildAuthHeaders,
 	isGatewayConfigured,
 	isGeminiApiAvailable,
-	DEFAULT_MODEL,
 } from "./gemini-api.ts";
 import { isGeminiWebAvailable, queryWithCookies } from "./gemini-web.ts";
 import type {
@@ -19,7 +18,6 @@ import type {
 	SearchResponse,
 	SearchResult,
 } from "./search-provider.ts";
-import { getWebSearchConfigPath } from "./utils.ts";
 
 export type {
 	AttributedSearchResponse,
@@ -28,60 +26,21 @@ export type {
 	SearchProvider,
 } from "./search-provider.ts";
 
-const CONFIG_PATH = getWebSearchConfigPath();
-let cachedSearchConfig: { searchProvider: SearchProvider; searchModel?: string } | null = null;
+type GeminiSearchSettings = Pick<WebAccessSettings,
+	"provider" | "searchProvider" | "searchModel" | "geminiApiKey" | "geminiBaseUrl" |
+	"cloudflareApiKey" | "allowBrowserCookies" | "chromeProfile"
+>;
 
-function normalizeSearchProvider(value: unknown): SearchProvider {
-	if (typeof value !== "string") return "auto";
-	switch (value.trim().toLowerCase()) {
-		case "auto": return "auto";
-		case "openai": return "openai";
-		case "exa": return "exa";
-		case "brave": return "brave";
-		case "parallel": return "parallel";
-		case "tavily": return "tavily";
-		case "perplexity": return "perplexity";
-		case "gemini": return "gemini";
-		default: return "auto";
-	}
+function currentSettings(settings?: GeminiSearchSettings): GeminiSearchSettings {
+	return settings ?? getWebAccessConfiguration().current();
 }
 
-function normalizeSearchModel(value: unknown): string | undefined {
-	if (typeof value !== "string") return undefined;
-	const normalized = value.trim();
-	return normalized.length > 0 ? normalized : undefined;
-}
-
-function getSearchConfig(): { searchProvider: SearchProvider; searchModel?: string } {
-	if (cachedSearchConfig) return cachedSearchConfig;
-	if (!existsSync(CONFIG_PATH)) {
-		cachedSearchConfig = { searchProvider: "auto" };
-		return cachedSearchConfig;
-	}
-
-	const rawText = readFileSync(CONFIG_PATH, "utf-8");
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(rawText);
-	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error);
-		throw new Error(`Failed to parse ${CONFIG_PATH}: ${message}`);
-	}
-	const searchProvider = parsed !== null && typeof parsed === "object"
-		? Reflect.get(parsed, "searchProvider") ?? Reflect.get(parsed, "provider")
-		: undefined;
-	const searchModel = parsed !== null && typeof parsed === "object"
-		? Reflect.get(parsed, "searchModel")
-		: undefined;
-	cachedSearchConfig = {
-		searchProvider: normalizeSearchProvider(searchProvider),
-		searchModel: normalizeSearchModel(searchModel),
+function getSearchConfig(settings?: GeminiSearchSettings): { searchProvider: SearchProvider; searchModel: string } {
+	const captured = currentSettings(settings);
+	return {
+		searchProvider: captured.searchProvider ?? captured.provider,
+		searchModel: captured.searchModel,
 	};
-	return cachedSearchConfig;
-}
-
-function getSearchModel(): string {
-	return getSearchConfig().searchModel ?? DEFAULT_MODEL;
 }
 
 function errorMessage(error: unknown): string {
@@ -92,11 +51,15 @@ function throwIfCallerCancelled(signal: AbortSignal | undefined): void {
 	if (signal?.aborted) signal.throwIfAborted();
 }
 
-async function searchWithGemini(query: string, options: SearchOptions): Promise<SearchResponse> {
+async function searchWithGemini(
+	query: string,
+	options: SearchOptions,
+	settings?: GeminiSearchSettings,
+): Promise<SearchResponse> {
 	const errors: string[] = [];
 
 	try {
-		const apiResult = await searchWithGeminiApi(query, options);
+		const apiResult = await searchWithGeminiApi(query, options, settings);
 		throwIfCallerCancelled(options.signal);
 		if (apiResult) return apiResult;
 	} catch (error) {
@@ -105,7 +68,7 @@ async function searchWithGemini(query: string, options: SearchOptions): Promise<
 	}
 
 	try {
-		const webResult = await searchWithGeminiWeb(query, options);
+		const webResult = await searchWithGeminiWeb(query, options, settings);
 		throwIfCallerCancelled(options.signal);
 		if (webResult) return webResult;
 	} catch (error) {
@@ -119,47 +82,58 @@ async function searchWithGemini(query: string, options: SearchOptions): Promise<
 
 	throw new Error(
 		"Gemini search unavailable. Either:\n" +
-		`  1. Set GEMINI_API_KEY in ${CONFIG_PATH}\n` +
+		`  1. Set GEMINI_API_KEY in ${getWebAccessConfiguration().sourcePath}\n` +
 		"  2. Set GOOGLE_GEMINI_BASE_URL + CLOUDFLARE_API_KEY for Cloudflare AI Gateway routing\n" +
 		"  3. Sign into gemini.google.com in a supported Chromium-based browser",
 	);
 }
 
-export const geminiSearchProvider: SearchProviderAdapter<"gemini"> = {
-	name: "gemini",
-	label: "Gemini",
-	eligibility: async () => isGeminiApiAvailable() || !!(await isGeminiWebAvailable())
-		? { eligible: true }
-		: { eligible: false, reason: "Gemini API, gateway, and browser credentials are not available." },
-	search: ({ query, options }) => searchWithGemini(query, options),
-};
+/** Creates a Gemini provider that closes over one immutable settings snapshot. */
+export function createGeminiSearchProvider(settings?: GeminiSearchSettings): SearchProviderAdapter<"gemini"> {
+	return {
+		name: "gemini",
+		label: "Gemini",
+		eligibility: async () => isGeminiApiAvailable(settings) || !!(await isGeminiWebAvailable(undefined, settings))
+			? { eligible: true }
+			: { eligible: false, reason: "Gemini API, gateway, and browser credentials are not available." },
+		search: ({ query, options }) => searchWithGemini(query, options, settings),
+	};
+}
 
-/** @deprecated Import the ready `webSearch` object from web-search.ts. */
+/** Backwards-compatible Gemini adapter that resolves process configuration per operation. */
+export const geminiSearchProvider: SearchProviderAdapter<"gemini"> = createGeminiSearchProvider();
+
+/** @deprecated Use the extension-registered Web search tool. */
 export async function search(query: string, options: FullSearchOptions = {}): Promise<AttributedSearchResponse> {
 	const config = getSearchConfig();
-	const { webSearch } = await import("./web-search.ts");
+	const { createConfiguredWebSearch } = await import("./web-search.ts");
+	const webSearch = createConfiguredWebSearch(getWebAccessConfiguration().current());
 	return webSearch.search(query, {
 		...options,
 		provider: options.provider ?? config.searchProvider,
 	});
 }
 
-async function searchWithGeminiApi(query: string, options: SearchOptions = {}): Promise<SearchResponse | null> {
-	const apiKey = getApiKey();
-	if (!apiKey && !isGatewayConfigured()) return null;
+async function searchWithGeminiApi(
+	query: string,
+	options: SearchOptions = {},
+	settings?: GeminiSearchSettings,
+): Promise<SearchResponse | null> {
+	const apiKey = getApiKey(settings);
+	if (!apiKey && !isGatewayConfigured(settings)) return null;
 
 	const activityId = activityMonitor.logStart({ type: "api", query });
 
 	try {
-		const model = getSearchModel();
+		const model = getSearchConfig(settings).searchModel;
 		const body = {
 			contents: [{ role: "user", parts: [{ text: query }] }],
 			tools: [{ google_search: {} }],
 		};
 
-		const res = await fetch(`${getVersionedApiBase()}/models/${model}:generateContent${buildKeyParam(apiKey)}`, {
+		const res = await fetch(`${getVersionedApiBase(settings)}/models/${model}:generateContent${buildKeyParam(apiKey, settings)}`, {
 			method: "POST",
-			headers: { "Content-Type": "application/json", ...buildAuthHeaders() },
+			headers: { "Content-Type": "application/json", ...buildAuthHeaders(settings) },
 			body: JSON.stringify(body),
 			signal: AbortSignal.any([
 				AbortSignal.timeout(60000),
@@ -194,8 +168,12 @@ async function searchWithGeminiApi(query: string, options: SearchOptions = {}): 
 	}
 }
 
-async function searchWithGeminiWeb(query: string, options: SearchOptions = {}): Promise<SearchResponse | null> {
-	const cookies = await isGeminiWebAvailable();
+async function searchWithGeminiWeb(
+	query: string,
+	options: SearchOptions = {},
+	settings?: GeminiSearchSettings,
+): Promise<SearchResponse | null> {
+	const cookies = await isGeminiWebAvailable(undefined, settings);
 	if (!cookies) return null;
 
 	const prompt = buildSearchPrompt(query, options);

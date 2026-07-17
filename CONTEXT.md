@@ -7,6 +7,15 @@ Web Access finds information on the web and retrieves source content for Pi sess
 **Web search**:
 A request for an answer and sources from the web. One search provider executes each attempt.
 
+**Agent Web search**:
+A Web search performed for an agent turn. It has one terminal completion point and never opens the Search Curator.
+
+**Search Curator**:
+A user-initiated browser workflow for selecting Web search results and approving a summary. It is not part of Agent Web search.
+
+**Web Access configuration**:
+User-controlled persistent settings for Web Access, interpreted with shared defaults. Credentials supplied outside those settings and provider eligibility are resolved separately.
+
 **Search provider**:
 An external search system that answers a web search and returns sources.
 

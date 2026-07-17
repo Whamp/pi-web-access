@@ -1,10 +1,10 @@
 import { settleWithAbort } from "./abort.ts";
-import { braveSearchProvider } from "./brave.ts";
-import { exaSearchProvider } from "./exa.ts";
-import { geminiSearchProvider } from "./gemini-search.ts";
-import { openAISearchProvider } from "./openai-search.ts";
-import { parallelSearchProvider } from "./parallel.ts";
-import { perplexitySearchProvider } from "./perplexity.ts";
+import { createBraveSearchProvider } from "./brave.ts";
+import { createExaSearchProvider } from "./exa.ts";
+import { createGeminiSearchProvider } from "./gemini-search.ts";
+import { createOpenAISearchProvider } from "./openai-search.ts";
+import { createParallelSearchProvider } from "./parallel.ts";
+import { createPerplexitySearchProvider } from "./perplexity.ts";
 import type {
 	FullSearchOptions,
 	ProviderEligibility,
@@ -13,11 +13,10 @@ import type {
 	SearchProviders,
 	WebSearch,
 } from "./search-provider.ts";
-import { tavilySearchProvider } from "./tavily.ts";
-import { getWebSearchConfigPath } from "./utils.ts";
+import { createTavilySearchProvider } from "./tavily.ts";
+import { getWebAccessConfiguration, type WebAccessSettings } from "./configuration.ts";
 
 const AUTO_PROVIDER_ORDER = ["openai", "exa", "brave", "parallel", "tavily", "perplexity", "gemini"] as const;
-const CONFIG_PATH = getWebSearchConfigPath();
 
 function shouldTryOpenAIInAuto(options: FullSearchOptions): boolean {
 	if (options.recencyFilter) return false;
@@ -67,7 +66,7 @@ function noProviderAvailableError(): Error {
 	return new Error(
 		"No search provider available. Either:\n" +
 		"  1. Use /login to sign in with a Codex subscription for OpenAI web search\n" +
-		`  2. Set openaiApiKey, braveApiKey, parallelApiKey, tavilyApiKey, perplexityApiKey, exaApiKey, geminiApiKey, or cloudflareApiKey in ${CONFIG_PATH}\n` +
+		`  2. Set openaiApiKey, braveApiKey, parallelApiKey, tavilyApiKey, perplexityApiKey, exaApiKey, geminiApiKey, or cloudflareApiKey in ${getWebAccessConfiguration().sourcePath}\n` +
 		"  3. Set OPENAI_API_KEY, BRAVE_API_KEY, PARALLEL_API_KEY, TAVILY_API_KEY, EXA_API_KEY, PERPLEXITY_API_KEY, GEMINI_API_KEY, or CLOUDFLARE_API_KEY env vars\n" +
 		"  4. Set GOOGLE_GEMINI_BASE_URL with CLOUDFLARE_API_KEY for Cloudflare AI Gateway routing\n" +
 		"  5. Sign into gemini.google.com in a supported Chromium-based browser",
@@ -103,7 +102,7 @@ export function createWebSearch(providers: SearchProviders): WebSearch {
 				let eligibility: ProviderEligibility;
 				try {
 					eligibility = await settleWithAbort(
-						() => selected.eligibility({ extensionContext: options.extensionContext, signal: options.signal }),
+						async () => selected.eligibility({ extensionContext: options.extensionContext, signal: options.signal }),
 						options.signal,
 					);
 				} catch (error) {
@@ -133,7 +132,7 @@ export function createWebSearch(providers: SearchProviders): WebSearch {
 				let eligibility: ProviderEligibility;
 				try {
 					eligibility = await settleWithAbort(
-						() => candidate.eligibility({ extensionContext: options.extensionContext, signal: options.signal }),
+						async () => candidate.eligibility({ extensionContext: options.extensionContext, signal: options.signal }),
 						options.signal,
 					);
 				} catch (error) {
@@ -164,12 +163,15 @@ export function createWebSearch(providers: SearchProviders): WebSearch {
 	};
 }
 
-export const webSearch = createWebSearch({
-	openai: openAISearchProvider,
-	exa: exaSearchProvider,
-	brave: braveSearchProvider,
-	parallel: parallelSearchProvider,
-	tavily: tavilySearchProvider,
-	perplexity: perplexitySearchProvider,
-	gemini: geminiSearchProvider,
-});
+/** Creates Web search adapters that all capture the supplied immutable settings value. */
+export function createConfiguredWebSearch(settings: Readonly<WebAccessSettings>): WebSearch {
+	return createWebSearch({
+		openai: createOpenAISearchProvider(settings),
+		exa: createExaSearchProvider(settings),
+		brave: createBraveSearchProvider(settings),
+		parallel: createParallelSearchProvider(settings),
+		tavily: createTavilySearchProvider(settings),
+		perplexity: createPerplexitySearchProvider(settings),
+		gemini: createGeminiSearchProvider(settings),
+	});
+}

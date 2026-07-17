@@ -5,9 +5,10 @@ import { StringEnum, complete, type Model } from "@earendil-works/pi-ai/compat";
 import { fetchAllContent, type ExtractedContent } from "./extract.ts";
 import { normalizeFetchContentParams } from "./fetch-params.ts";
 import { clearCloneCache } from "./github-extract.ts";
-import type { ResolvedSearchProvider, SearchProvider, SearchResult } from "./search-provider.ts";
-import { webSearch } from "./web-search.ts";
-import { formatSeconds, getWebSearchConfigDir, getWebSearchConfigPath } from "./utils.ts";
+import type { ResolvedSearchProvider, SearchProvider, SearchResult, WebSearch } from "./search-provider.ts";
+import { createConfiguredWebSearch } from "./web-search.ts";
+import { formatSeconds } from "./utils.ts";
+import { getWebAccessConfiguration, type MediaSettings, type WebAccessSettings } from "./configuration.ts";
 import {
 	createStoredResultStore,
 	storedResultRetrievalCall,
@@ -25,14 +26,13 @@ import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { platform } from "node:os";
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { getActiveGoogleEmail, isGeminiWebAvailable } from "./gemini-web.ts";
 import { isBrowserCookieAccessAllowed } from "./gemini-web-config.ts";
 import { buildSearchErrorPlan, type SearchErrorDetails, type SearchErrorPlan } from "./render-search-error.ts";
 import { loadEnabledModelPatterns, modelMatchesEnabledPatterns } from "./summary-model-scope.ts";
 
-const WEB_SEARCH_CONFIG_PATH = getWebSearchConfigPath();
 
 /** Shared collapsed/expanded renderer for an error/cancel plan produced by
  * buildSearchErrorPlan(). Used by every tool renderResult's error branch so
@@ -52,22 +52,8 @@ function renderSearchErrorPlan(plan: SearchErrorPlan, expanded: boolean, theme: 
 	return box;
 }
 
-interface WebSearchConfig {
-	provider?: string;
-	workflow?: string;
-	curatorTimeoutSeconds?: unknown;
-	summaryModel?: string;
-	webSearch?: {
-		enabled?: boolean;
-	};
-	shortcuts?: {
-		curate?: string;
-		activity?: string;
-	};
-	ssrf?: {
-		/** CIDR ranges exempted from the SSRF guard (e.g. fake-IP proxy ranges). */
-		allowRanges?: string[];
-	};
+function captureMediaSettings(settings: Readonly<WebAccessSettings>): Readonly<MediaSettings> {
+	return Object.freeze({ youtube: settings.youtube, video: settings.video });
 }
 
 interface ProviderAvailability {
@@ -90,62 +76,12 @@ interface CuratorBootstrap {
 	timeoutSeconds: number;
 }
 
-function loadConfig(): WebSearchConfig {
-	if (!existsSync(WEB_SEARCH_CONFIG_PATH)) return {};
-	const raw = readFileSync(WEB_SEARCH_CONFIG_PATH, "utf-8");
-	try {
-		return JSON.parse(raw) as WebSearchConfig;
-	} catch (err) {
-		const message = err instanceof Error ? err.message : String(err);
-		throw new Error(`Failed to parse ${WEB_SEARCH_CONFIG_PATH}: ${message}`);
-	}
-}
-
-function saveConfig(updates: Partial<WebSearchConfig>): void {
-	let config: Record<string, unknown> = {};
-	if (existsSync(WEB_SEARCH_CONFIG_PATH)) {
-		const raw = readFileSync(WEB_SEARCH_CONFIG_PATH, "utf-8");
-		try {
-			config = JSON.parse(raw) as Record<string, unknown>;
-		} catch (err) {
-			const message = err instanceof Error ? err.message : String(err);
-			throw new Error(`Failed to parse ${WEB_SEARCH_CONFIG_PATH}: ${message}`);
-		}
-	}
-
-	Object.assign(config, updates);
-	const dir = getWebSearchConfigDir();
-	if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-	writeFileSync(WEB_SEARCH_CONFIG_PATH, JSON.stringify(config, null, 2) + "\n");
-}
-
-const DEFAULT_SHORTCUTS = { curate: "ctrl+shift+s", activity: "ctrl+shift+w" };
-const DEFAULT_CURATOR_TIMEOUT_SECONDS = 20;
-const MAX_CURATOR_TIMEOUT_SECONDS = 600;
-
-function loadConfigForExtensionInit(): WebSearchConfig {
-	try {
-		return loadConfig();
-	} catch (err) {
-		const message = err instanceof Error ? err.message : String(err);
-		console.error(`[pi-web-access] ${message}`);
-		return {};
-	}
-}
-
 function normalizeProviderInput(value: unknown): SearchProvider | undefined {
 	if (value === undefined) return undefined;
 	if (typeof value !== "string") return "auto";
 	const normalized = value.trim().toLowerCase();
 	const valid: SearchProvider[] = ["auto", "openai", "brave", "parallel", "tavily", "exa", "perplexity", "gemini"];
 	return valid.includes(normalized as SearchProvider) ? normalized as SearchProvider : "auto";
-}
-
-function normalizeCuratorTimeoutSeconds(value: unknown): number | undefined {
-	if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
-	const normalized = Math.floor(value);
-	if (normalized < 1) return undefined;
-	return Math.min(normalized, MAX_CURATOR_TIMEOUT_SECONDS);
 }
 
 interface ResolvedAgentWorkflow {
@@ -175,12 +111,11 @@ function normalizeQueryList(queryList: unknown[]): string[] {
 	return normalized;
 }
 
-function getCuratorTimeoutSeconds(): number {
-	const source = loadConfig();
-	return normalizeCuratorTimeoutSeconds(source.curatorTimeoutSeconds) ?? DEFAULT_CURATOR_TIMEOUT_SECONDS;
+function getCuratorTimeoutSeconds(settings: Readonly<WebAccessSettings>): number {
+	return settings.curatorTimeoutSeconds;
 }
 
-async function getProviderAvailability(ctx: ExtensionContext): Promise<ProviderAvailability> {
+async function getProviderAvailability(ctx: ExtensionContext, webSearch: WebSearch): Promise<ProviderAvailability> {
 	const eligibility = await webSearch.eligibility({ extensionContext: ctx });
 	return {
 		openai: eligibility.openai.eligible,
@@ -205,13 +140,15 @@ function shouldPreferOpenAI(options?: Pick<PendingCurate, "numResults" | "recenc
 async function loadCuratorBootstrap(
 	requestedProvider: unknown,
 	ctx: ExtensionContext,
-	options?: Pick<PendingCurate, "numResults" | "recencyFilter">,
+	settings: Readonly<WebAccessSettings>,
+	options: Pick<PendingCurate, "numResults" | "recencyFilter"> | undefined,
+	webSearch: WebSearch,
 ): Promise<CuratorBootstrap> {
-	const availableProviders = await getProviderAvailability(ctx);
+	const availableProviders = await getProviderAvailability(ctx, webSearch);
 	return {
 		availableProviders,
-		defaultProvider: resolveProvider(requestedProvider, availableProviders, options),
-		timeoutSeconds: getCuratorTimeoutSeconds(),
+		defaultProvider: resolveProvider(requestedProvider, availableProviders, settings, options),
+		timeoutSeconds: getCuratorTimeoutSeconds(settings),
 	};
 }
 
@@ -229,9 +166,10 @@ function firstAvailableProvider(available: ProviderAvailability, preferOpenAI: b
 function resolveProvider(
 	requested: unknown,
 	available: ProviderAvailability,
+	settings: Readonly<WebAccessSettings>,
 	options?: Pick<PendingCurate, "numResults" | "recencyFilter">,
 ): ResolvedSearchProvider {
-	const provider = normalizeProviderInput(requested ?? loadConfig().provider ?? "auto") ?? "auto";
+	const provider = normalizeProviderInput(requested ?? settings.provider) ?? "auto";
 	const preferOpenAI = shouldPreferOpenAI(options);
 
 	if (provider === "auto") {
@@ -485,10 +423,12 @@ function formatEntryLine(
 }
 
 export default function (pi: ExtensionAPI) {
+	const configuration = getWebAccessConfiguration();
+	const initConfig = configuration.current();
+	const webSearch = createConfiguredWebSearch(initConfig);
 	const storedResultStore = createStoredResultStore();
-	const initConfig = loadConfigForExtensionInit();
-	const curateKey = initConfig.shortcuts?.curate || DEFAULT_SHORTCUTS.curate;
-	const activityKey = initConfig.shortcuts?.activity || DEFAULT_SHORTCUTS.activity;
+	const curateKey = initConfig.shortcuts.curate;
+	const activityKey = initConfig.shortcuts.activity;
 	const activeSearches = new Map<string, AbortController>();
 
 	function abortActiveSearches(): void {
@@ -550,6 +490,7 @@ export default function (pi: ExtensionAPI) {
 		inlineContent: ExtractedContent[],
 		executionSignal: AbortSignal,
 		onUpdate: ((update: { content: Array<{ type: "text"; text: string }>; details: Record<string, unknown> }) => void) | undefined,
+		settings: Readonly<WebAccessSettings>,
 	): Promise<ExtractedContent[]> {
 		const inlineByUrl = new Map<string, ExtractedContent>();
 		for (const item of inlineContent) {
@@ -583,7 +524,10 @@ export default function (pi: ExtensionAPI) {
 			await Promise.all(missing.map(async ([key, url]) => {
 				let item: ExtractedContent | undefined;
 				try {
-					[item] = await fetchAllContent([url], contentSignal);
+					[item] = await fetchAllContent([url], contentSignal, {
+						settings,
+						media: captureMediaSettings(settings),
+					});
 				} catch (error) {
 					if (executionSignal.aborted) throw executionSignal.reason;
 					if (!deadlineSignal.aborted) throw error;
@@ -762,6 +706,7 @@ export default function (pi: ExtensionAPI) {
 
 	async function loadSummaryModelChoices(
 		summaryContext: SummaryGenerationContext,
+		settings: Readonly<WebAccessSettings>,
 	): Promise<{ summaryModels: Array<{ value: string; label: string }>; defaultSummaryModel: string | null }> {
 		const summaryModels: Array<{ value: string; label: string }> = [];
 		const seen = new Set<string>();
@@ -798,8 +743,7 @@ export default function (pi: ExtensionAPI) {
 			addModel(summaryContext.model.provider, summaryContext.model.id);
 		}
 
-		const config = loadConfig();
-		const configuredSummaryModel = typeof config.summaryModel === "string" ? config.summaryModel.trim() : "";
+		const configuredSummaryModel = settings.summaryModel ?? "";
 		const preferredDefaults = [
 			"anthropic/claude-haiku-4-5",
 			"openai-codex/gpt-5.3-codex-spark",
@@ -1062,18 +1006,13 @@ export default function (pi: ExtensionAPI) {
 						}
 						closeCurator(callId);
 					},
-					onProviderChange(provider) {
+					async onProviderChange(provider) {
 						if (pendingCurates.get(callId) !== pc) return;
 						const normalized = normalizeProviderInput(provider);
 						if (!normalized || normalized === "auto") return;
+						await configuration.update({ provider: normalized });
 						pc.defaultProvider = normalized;
 						pc.searchProvider = normalized;
-						try {
-							saveConfig({ provider: normalized });
-						} catch (err) {
-							const message = err instanceof Error ? err.message : String(err);
-							console.error(`Failed to persist default provider: ${message}`);
-						}
 					},
 					async onAddSearch(query, queryIndex, provider) {
 						if (pendingCurates.get(callId) !== pc) throw new Error("Curator session is no longer active.");
@@ -1262,6 +1201,7 @@ export default function (pi: ExtensionAPI) {
 		}),
 
 		async execute(callId, params, signal, onUpdate, ctx) {
+			const workSettings = configuration.current();
 			const sessionController = new AbortController();
 			activeSearches.set(callId, sessionController);
 			const executionSignal = signal ? AbortSignal.any([signal, sessionController.signal]) : sessionController.signal;
@@ -1270,8 +1210,7 @@ export default function (pi: ExtensionAPI) {
 				? params.queries
 				: (params.query !== undefined ? [params.query] : []);
 			const queryList = normalizeQueryList(rawQueryList);
-			const configWorkflow = loadConfigForExtensionInit().workflow;
-			const resolvedWorkflow = resolveAgentWorkflow(params.workflow ?? configWorkflow);
+			const resolvedWorkflow = resolveAgentWorkflow(params.workflow ?? workSettings.workflow);
 			const workflow = resolvedWorkflow.workflow;
 
 			if (queryList.length === 0) {
@@ -1284,7 +1223,7 @@ export default function (pi: ExtensionAPI) {
 			const searchResults: QueryResultData[] = [];
 			const allUrls: string[] = [];
 			const allInlineContent: ExtractedContent[] = [];
-			const resolvedProvider = normalizeProviderInput(params.provider ?? loadConfig().provider);
+			const resolvedProvider = normalizeProviderInput(params.provider ?? workSettings.provider);
 
 			for (let i = 0; i < queryList.length; i++) {
 				const query = queryList[i];
@@ -1341,7 +1280,7 @@ export default function (pi: ExtensionAPI) {
 					cwd: ctx.cwd,
 					isProjectTrusted: () => ctx.isProjectTrusted(),
 				};
-				const summaryModelChoices = await loadSummaryModelChoices(summaryContext);
+				const summaryModelChoices = await loadSummaryModelChoices(summaryContext, workSettings);
 				const generated = await generateSummaryDraft(searchResults, summaryContext, executionSignal, summaryModelChoices.defaultSummaryModel ?? undefined);
 				approvedSummary = generated.summary;
 				summaryMeta = generated.meta;
@@ -1349,7 +1288,7 @@ export default function (pi: ExtensionAPI) {
 
 			executionSignal.throwIfAborted();
 			const terminalContent = params.includeContent
-				? await retrieveTerminalContent(allUrls, allInlineContent, executionSignal, onUpdate)
+				? await retrieveTerminalContent(allUrls, allInlineContent, executionSignal, onUpdate, workSettings)
 				: undefined;
 			executionSignal.throwIfAborted();
 			const searchReturn = buildSearchReturn({
@@ -1650,6 +1589,8 @@ export default function (pi: ExtensionAPI) {
 		}),
 
 		async execute(_toolCallId, params, signal, onUpdate) {
+			const workSettings = configuration.current();
+			const media = captureMediaSettings(workSettings);
 			const { urlList, options } = normalizeFetchContentParams(params);
 			if (urlList.length === 0) {
 				return {
@@ -1663,7 +1604,7 @@ export default function (pi: ExtensionAPI) {
 				details: { phase: "fetch", progress: 0 },
 			});
 
-			const fetchResults = await fetchAllContent(urlList, signal, options);
+			const fetchResults = await fetchAllContent(urlList, signal, { ...options, settings: workSettings, media });
 			const successful = fetchResults.filter((r) => !r.error).length;
 			const totalChars = fetchResults.reduce((sum, r) => sum + r.content.length, 0);
 
@@ -1978,6 +1919,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("websearch", {
 		description: "Open web search curator",
 		handler: async (args, ctx) => {
+			const workSettings = configuration.current();
 			const sessionToken = randomUUID();
 			const commandCallId = `cmd:${sessionToken}`;
 			closeCurator(commandCallId);
@@ -1989,7 +1931,7 @@ export default function (pi: ExtensionAPI) {
 
 			let bootstrap: CuratorBootstrap;
 			try {
-				bootstrap = await loadCuratorBootstrap(undefined, ctx);
+				bootstrap = await loadCuratorBootstrap(undefined, ctx, workSettings, undefined, webSearch);
 			} catch (err) {
 				const message = err instanceof Error ? err.message : String(err);
 				ctx.ui.notify(`Failed to load web search config: ${message}`, "error");
@@ -1999,7 +1941,7 @@ export default function (pi: ExtensionAPI) {
 			const initialProvider = bootstrap.defaultProvider;
 			const curatorTimeoutSeconds = bootstrap.timeoutSeconds;
 			let currentProvider = initialProvider;
-			const rawSearchProvider = normalizeProviderInput(loadConfig().provider ?? "auto") ?? "auto";
+			const rawSearchProvider = normalizeProviderInput(workSettings.searchProvider ?? workSettings.provider) ?? "auto";
 			let currentSearchProvider = rawSearchProvider;
 			const summaryContext: SummaryGenerationContext = {
 				model: ctx.model,
@@ -2007,7 +1949,7 @@ export default function (pi: ExtensionAPI) {
 				cwd: ctx.cwd,
 				isProjectTrusted: () => ctx.isProjectTrusted(),
 			};
-			const summaryModelChoices = await loadSummaryModelChoices(summaryContext);
+			const summaryModelChoices = await loadSummaryModelChoices(summaryContext, workSettings);
 
 			ctx.ui.notify("Opening web search curator...", "info");
 
@@ -2097,18 +2039,13 @@ export default function (pi: ExtensionAPI) {
 							}
 							closeCurator(commandCallId);
 						},
-						onProviderChange(provider) {
+						async onProviderChange(provider) {
 							if (commandHandle && !isCommandActive()) return;
 							const normalized = normalizeProviderInput(provider);
 							if (!normalized || normalized === "auto") return;
+							await configuration.update({ provider: normalized });
 							currentProvider = normalized;
 							currentSearchProvider = normalized;
-							try {
-								saveConfig({ provider: normalized });
-							} catch (err) {
-								const message = err instanceof Error ? err.message : String(err);
-								console.error(`Failed to persist default provider: ${message}`);
-							}
 						},
 						async onAddSearch(query, queryIndex, provider) {
 							if (commandHandle && !isCommandActive()) {
@@ -2230,7 +2167,7 @@ export default function (pi: ExtensionAPI) {
 			if (!isBrowserCookieAccessAllowed()) {
 				pi.sendMessage({
 					customType: "google-account",
-					content: [{ type: "text", text: `Gemini Web browser cookie access is disabled. Set allowBrowserCookies: true in ${WEB_SEARCH_CONFIG_PATH} to enable it.` }],
+					content: [{ type: "text", text: `Gemini Web browser cookie access is disabled. Set allowBrowserCookies: true in ${configuration.sourcePath} to enable it.` }],
 					display: true,
 					details: { available: false, cookieAccessAllowed: false },
 				}, { triggerTurn: true, deliverAs: "followUp" });

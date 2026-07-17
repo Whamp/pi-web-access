@@ -2,6 +2,7 @@ import { Readability } from "@mozilla/readability";
 import { parseHTML } from "linkedom";
 import TurndownService from "turndown";
 import { activityMonitor } from "./activity.ts";
+import { DEFAULT_MEDIA_SETTINGS, DEFAULT_WEB_ACCESS_SETTINGS, getWebAccessConfiguration, type MediaSettings, type WebAccessSettings } from "./configuration.ts";
 import { settleWithAbort } from "./abort.ts";
 import { createAbortableLimiter } from "./abortable-limit.ts";
 import { extractRSCContent } from "./rsc-extract.ts";
@@ -11,9 +12,8 @@ import { isYouTubeURL, isYouTubeEnabled, extractYouTube, extractYouTubeFrame, ex
 import { extractWithUrlContext, extractWithGeminiWeb } from "./gemini-url-context.ts";
 import { extractWithParallel, isParallelAvailable } from "./parallel.ts";
 import { isVideoFile, extractVideo, extractVideoFrame, getLocalVideoDuration } from "./video-extract.ts";
-import { existsSync, readFileSync } from "node:fs";
 import { fetchRemoteUrl, validateRemoteUrl, type Lookup } from "./ssrf-protection.ts";
-import { formatSeconds, getWebSearchConfigPath } from "./utils.ts";
+import { formatSeconds } from "./utils.ts";
 import { discardResponseBody, fetchOwnedResponse, readResponseBytes, readResponseText } from "./response-body.ts";
 
 const DEFAULT_TIMEOUT_MS = 30000;
@@ -21,47 +21,11 @@ const CONCURRENT_LIMIT = 3;
 
 const NON_RECOVERABLE_ERRORS = ["Unsupported content type", "Response too large"];
 const MIN_USEFUL_CONTENT = 500;
-const WEB_SEARCH_CONFIG_PATH = getWebSearchConfigPath();
 
-/**
- * Read `ssrf.allowRanges` (CIDR strings) from web-search.json. Returns [] when
- * the file is missing, unreadable, or the key is unset so SSRF protection stays
- * fully on by default. Throws when `ssrf.allowRanges` is present but not an array
- * so a mistyped value (e.g. a bare string instead of a JSON array) fails loudly
- * instead of being silently ignored. Exempts synthetic ranges used by TUN/fake-IP
- * proxies (e.g. 198.18.0.0/15).
- */
-export function loadSsrfAllowRanges(): string[] {
-	let value: unknown;
-	try {
-		if (!existsSync(WEB_SEARCH_CONFIG_PATH)) return [];
-		const raw = readFileSync(WEB_SEARCH_CONFIG_PATH, "utf-8");
-		value = (JSON.parse(raw) as { ssrf?: { allowRanges?: unknown } })?.ssrf?.allowRanges;
-	} catch {
-		// Missing/unreadable file or invalid JSON: fail safe with SSRF fully on.
-		return [];
-	}
-	if (value === undefined || value === null) return [];
-	if (!Array.isArray(value)) {
-		throw new Error(`ssrf.allowRanges in ${WEB_SEARCH_CONFIG_PATH} must be an array of CIDR strings`);
-	}
-	const ranges: string[] = [];
-	for (const [index, entry] of value.entries()) {
-		if (typeof entry !== "string") {
-			throw new Error(`ssrf.allowRanges in ${WEB_SEARCH_CONFIG_PATH} must contain only CIDR strings; entry ${index + 1} is ${typeof entry}`);
-		}
-		const trimmed = entry.trim();
-		if (trimmed) ranges.push(trimmed);
-	}
-	return ranges;
-}
+type ContentRetrievalSettings = Pick<WebAccessSettings, "ssrf" | "githubClone" | "parallelApiKey">;
 
 function errorMessage(err: unknown): string {
 	return err instanceof Error ? err.message : String(err);
-}
-
-function isConfigParseError(err: unknown): boolean {
-	return errorMessage(err).startsWith("Failed to parse ");
 }
 
 function isAbortError(err: unknown): boolean {
@@ -99,12 +63,16 @@ export interface ExtractedContent {
 }
 
 export interface ExtractOptions {
+	/** Validated settings captured when this content retrieval starts. */
+	settings?: Readonly<ContentRetrievalSettings>;
 	timeoutMs?: number;
 	forceClone?: boolean;
 	prompt?: string;
 	timestamp?: string;
 	frames?: number;
 	model?: string;
+	/** Startup-validated settings captured for this extraction operation. */
+	media?: Readonly<MediaSettings>;
 	/** Custom DNS resolver used for SSRF validation. Primarily a test seam. */
 	lookup?: Lookup;
 }
@@ -116,6 +84,7 @@ async function extractWithJinaReader(
 	url: string,
 	signal?: AbortSignal,
 	lookup?: Lookup,
+	allowRanges: readonly string[] = DEFAULT_WEB_ACCESS_SETTINGS.ssrf.allowRanges,
 ): Promise<ExtractedContent | null> {
 	const jinaUrl = JINA_READER_BASE + url;
 
@@ -126,7 +95,7 @@ async function extractWithJinaReader(
 			AbortSignal.timeout(JINA_TIMEOUT_MS),
 			...(signal ? [signal] : []),
 		]);
-		await validateRemoteUrl(url, { allowRanges: loadSsrfAllowRanges(), lookup, signal: requestSignal });
+		await validateRemoteUrl(url, { allowRanges, lookup, signal: requestSignal });
 		const res = await fetchOwnedResponse(jinaUrl, {
 			headers: {
 				"Accept": "text/markdown",
@@ -241,9 +210,9 @@ async function extractLocalFrames(
 	return { frames, error: frames.length === 0 && firstError ? firstError.error : null };
 }
 
-function safeVideoInfo(url: string): { info: ReturnType<typeof isVideoFile>; error?: string } {
+function safeVideoInfo(url: string, settings: MediaSettings["video"]): { info: ReturnType<typeof isVideoFile>; error?: string } {
 	try {
-		return { info: isVideoFile(url) };
+		return { info: isVideoFile(url, settings) };
 	} catch (err) {
 		return { info: null, error: errorMessage(err) };
 	}
@@ -257,6 +226,7 @@ export async function extractContent(
 	if (signal?.aborted) {
 		return { url, title: "", content: "", error: "Aborted" };
 	}
+	const media = options?.media ?? DEFAULT_MEDIA_SETTINGS;
 
 	if (options?.frames && !options.timestamp) {
 		const frameCount = options.frames;
@@ -277,7 +247,7 @@ export async function extractContent(
 			return buildFrameResult(url, label, timestamps.length, result.frames, result.error, streamInfo.duration);
 		}
 
-		const localVideo = safeVideoInfo(url);
+		const localVideo = safeVideoInfo(url, media.video);
 		if (localVideo.error) {
 			return { url, title: "", content: "", error: localVideo.error };
 		}
@@ -360,7 +330,7 @@ export async function extractContent(
 			return { url, title: `Frame at ${options.timestamp}`, content: `Video frame at ${options.timestamp}`, error: null, thumbnail: frame };
 		}
 
-		const localVideo = safeVideoInfo(url);
+		const localVideo = safeVideoInfo(url, media.video);
 		if (localVideo.error) {
 			return { url, title: "", content: "", error: localVideo.error };
 		}
@@ -392,15 +362,15 @@ export async function extractContent(
 		return { url, title: "", content: "", error: "Timestamp extraction only works with YouTube and local video files" };
 	}
 
-	const localVideo = safeVideoInfo(url);
+	const localVideo = safeVideoInfo(url, media.video);
 	if (localVideo.error) {
 		return { url, title: "", content: "", error: localVideo.error };
 	}
 	if (localVideo.info) {
 		try {
-			const result = await extractVideo(localVideo.info, signal, options);
+			const result = await extractVideo(localVideo.info, signal, options, media.video);
 			if (signal?.aborted) return abortedResult(url);
-			return result ?? { url, title: "", content: "", error: `Video analysis requires Gemini access. Either:\n  1. Sign into gemini.google.com in Chrome (free, uses cookies)\n  2. Set GEMINI_API_KEY in ${WEB_SEARCH_CONFIG_PATH}` };
+			return result ?? { url, title: "", content: "", error: `Video analysis requires Gemini access. Either:\n  1. Sign into gemini.google.com in Chrome (free, uses cookies)\n  2. Set GEMINI_API_KEY in ${getWebAccessConfiguration().sourcePath}` };
 		} catch (err) {
 			if (isAbortError(err)) return abortedResult(url);
 			return { url, title: "", content: "", error: errorMessage(err) };
@@ -410,34 +380,30 @@ export async function extractContent(
 	try {
 		const parsed = new URL(url);
 		if (parsed.protocol === "http:" || parsed.protocol === "https:") {
-			await validateRemoteUrl(parsed, { allowRanges: loadSsrfAllowRanges(), lookup: options?.lookup, signal });
+			await validateRemoteUrl(parsed, { allowRanges: options?.settings?.ssrf.allowRanges ?? DEFAULT_WEB_ACCESS_SETTINGS.ssrf.allowRanges, lookup: options?.lookup, signal });
 		}
 	} catch (err) {
 		return { url, title: "", content: "", error: errorMessage(err) };
 	}
 
 	try {
-		const ghResult = await extractGitHub(url, signal, options?.forceClone);
+		const ghResult = await extractGitHub(url, signal, options?.forceClone, options?.settings?.githubClone ?? DEFAULT_WEB_ACCESS_SETTINGS.githubClone);
 		if (ghResult) return ghResult;
 		if (signal?.aborted) return abortedResult(url);
 	} catch (err) {
-		const message = errorMessage(err);
 		if (isAbortError(err)) return abortedResult(url);
-		if (isConfigParseError(err)) {
-			return { url, title: "", content: "", error: message };
-		}
 	}
 
 	const ytInfo = isYouTubeURL(url);
 	let youtubeEnabled = false;
 	try {
-		youtubeEnabled = isYouTubeEnabled();
+		youtubeEnabled = isYouTubeEnabled(media.youtube);
 	} catch (err) {
 		return { url, title: "", content: "", error: errorMessage(err) };
 	}
 	if (ytInfo.isYouTube && youtubeEnabled) {
 		try {
-			const ytResult = await extractYouTube(url, signal, options?.prompt, options?.model);
+			const ytResult = await extractYouTube(url, signal, options?.prompt, options?.model, media.youtube);
 			if (ytResult) return ytResult;
 			if (signal?.aborted) return abortedResult(url);
 		} catch (err) {
@@ -461,22 +427,20 @@ export async function extractContent(
 	if (!httpResult.error) return httpResult;
 	if (NON_RECOVERABLE_ERRORS.some(prefix => httpResult.error!.startsWith(prefix))) return httpResult;
 
-	const jinaResult = await extractWithJinaReader(url, signal, options?.lookup);
+	const jinaResult = await extractWithJinaReader(url, signal, options?.lookup, options?.settings?.ssrf.allowRanges);
 	if (jinaResult) return jinaResult;
 	if (signal?.aborted) return abortedResult(url);
 
 	let parallelError: string | null = null;
 	try {
-		if (isParallelAvailable()) {
-			const parallelResult = await extractWithParallel(url, signal, options);
+		const settings = options?.settings ?? {};
+		if (isParallelAvailable(settings)) {
+			const parallelResult = await extractWithParallel(url, signal, options, settings);
 			if (parallelResult) return parallelResult;
 		}
 	} catch (err) {
 		if (isAbortError(err)) return abortedResult(url);
 		parallelError = errorMessage(err);
-		if (isConfigParseError(err)) {
-			return { ...httpResult, error: parallelError };
-		}
 	}
 	if (signal?.aborted) return abortedResult(url);
 
@@ -486,9 +450,6 @@ export async function extractContent(
 			?? await extractWithGeminiWeb(url, signal);
 	} catch (err) {
 		if (isAbortError(err)) return abortedResult(url);
-		if (isConfigParseError(err)) {
-			return { ...httpResult, error: errorMessage(err) };
-		}
 	}
 
 	if (geminiResult) return geminiResult;
@@ -499,8 +460,8 @@ export async function extractContent(
 		...(parallelError ? [`Parallel fallback failed: ${parallelError}`] : []),
 		"",
 		"Fallback options:",
-		`  \u2022 Set PARALLEL_API_KEY in ${WEB_SEARCH_CONFIG_PATH}`,
-		`  \u2022 Set GEMINI_API_KEY in ${WEB_SEARCH_CONFIG_PATH}`,
+		`  \u2022 Set PARALLEL_API_KEY in ${getWebAccessConfiguration().sourcePath}`,
+		`  \u2022 Set GEMINI_API_KEY in ${getWebAccessConfiguration().sourcePath}`,
 		"  \u2022 Sign into gemini.google.com in Chrome",
 		"  \u2022 Use web_search to find content about this topic",
 	].join("\n");
@@ -560,7 +521,7 @@ async function extractViaHttp(
 					"Upgrade-Insecure-Requests": "1",
 				},
 			},
-			{ allowRanges: loadSsrfAllowRanges(), lookup: options?.lookup, signal: controller.signal },
+			{ allowRanges: options?.settings?.ssrf.allowRanges ?? DEFAULT_WEB_ACCESS_SETTINGS.ssrf.allowRanges, lookup: options?.lookup, signal: controller.signal },
 		);
 
 		if (!response.ok) {

@@ -20,7 +20,7 @@ interface ValidationOptions {
 	 * that resolves public domains into a reserved range. Entries are validated
 	 * strictly; an invalid entry throws so misconfiguration is not silent.
 	 */
-	allowRanges?: string[];
+	allowRanges?: readonly string[];
 }
 
 /** Parsed entry from `allowRanges`: a network address (4 or 16 bytes) + prefix length. */
@@ -189,6 +189,11 @@ function parseIPv6(address: string): number[] | null {
 		return parseInt(part, 16);
 	});
 	return groups.length === 8 && groups.every(group => group >= 0 && group <= 0xffff) ? groups : null;
+}
+
+/** Validate the persistent SSRF exception list before retrieval starts. */
+export function validateSsrfAllowRanges(input: unknown): void {
+	parseAllowRanges(input);
 }
 
 /** Parse `allowRanges` config value into validated CIDR rules. Throws on malformed entries. */
