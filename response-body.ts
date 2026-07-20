@@ -1,4 +1,5 @@
 import { abortReason, settleWithAbort } from "./abort.ts";
+import { ResponseBodyTooLargeError } from "./errors.ts";
 
 const DISPOSAL_GRACE_MS = 100;
 
@@ -52,10 +53,17 @@ export function fetchOwnedResponse(
 	);
 }
 
-export async function readResponseBytes(response: Response, signal?: AbortSignal): Promise<Uint8Array> {
+export async function readResponseBytes(
+	response: Response,
+	signal?: AbortSignal,
+	maxBytes?: number,
+): Promise<Uint8Array> {
 	if (!response.body) {
 		const buffer = await response.arrayBuffer();
 		signal?.throwIfAborted();
+		if (maxBytes !== undefined && buffer.byteLength > maxBytes) {
+			throw new ResponseBodyTooLargeError(maxBytes, buffer.byteLength);
+		}
 		return new Uint8Array(buffer);
 	}
 
@@ -83,6 +91,11 @@ export async function readResponseBytes(response: Response, signal?: AbortSignal
 			if (done) break;
 			chunks.push(value);
 			size += value.byteLength;
+			if (maxBytes !== undefined && size > maxBytes) {
+				const error = new ResponseBodyTooLargeError(maxBytes, size);
+				await cancel(error);
+				throw error;
+			}
 		}
 		signal?.throwIfAborted();
 

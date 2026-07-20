@@ -4,7 +4,7 @@
 
 # Pi Web Access
 
-Web search, source retrieval, GitHub cloning, PDF extraction, and video understanding for [Pi](https://pi.dev).
+Web search, source retrieval, document conversion, GitHub cloning, and video understanding for [Pi](https://pi.dev).
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux%20%7C%20Windows*-blue?style=for-the-badge)](#limitations)
@@ -45,7 +45,7 @@ This fork is not published to npm.
 ## What it provides
 
 - **Web search:** OpenAI, Exa, Brave, Parallel, Tavily, Perplexity, and Gemini.
-- **Source retrieval:** readable Markdown from web pages, PDFs, JSON, text, and Next.js RSC responses.
+- **Source retrieval:** readable Markdown from web pages, PDFs, DOCX, PPTX, XLSX, JSON, text, and Next.js RSC responses.
 - **GitHub access:** local clones for repository URLs, with API fallback for large repositories and commit URLs.
 - **Video understanding:** YouTube and local video analysis through Gemini, plus timestamped frame extraction.
 - **Search review:** an optional browser curator for selecting results and approving summaries.
@@ -194,7 +194,7 @@ fetch_content(input)
   → local video: Gemini Files API → Gemini Web
   → GitHub URL: clone → GitHub API fallback
   → YouTube: Gemini Web → Gemini API → Perplexity
-  → HTTP: PDF extraction
+  → HTTP: PDF/DOCX/PPTX/XLSX conversion
         or Readability → RSC parser → Jina Reader → Gemini fallback
   → text, JSON, or Markdown: return directly
 ```
@@ -203,11 +203,11 @@ fetch_content(input)
 
 Repository URLs are cloned into a session cache. Root URLs return a tree and README; `/tree/` paths return directory listings; `/blob/` paths return file contents. Repositories above 350 MB use a lightweight GitHub API view unless `forceClone` is set. Private repositories require an authenticated `gh` CLI.
 
-### Web pages and PDFs
+### Web pages and documents
 
 HTML passes through Readability first. The extension can then parse Next.js RSC data or retry through Jina Reader, Parallel, and Gemini. The SSRF guard blocks private and reserved address ranges unless explicitly configured.
 
-PDF text is written as Markdown under `~/Downloads/`. Scanned documents require a separate OCR tool.
+PDF, DOCX, PPTX, and XLSX responses are converted to Markdown directly. PDF conversion preserves useful structure such as headings, columns, and ruled tables when the source contains it. Scanned documents require a separate OCR tool.
 
 ### YouTube and local video
 
@@ -349,7 +349,7 @@ The tests use Node’s built-in test runner. Provider tests mock network request
 - Headless, SSH, Docker, and WSL sessions may require a tunnel to open the curator URL in another browser.
 - YouTube private or age-restricted videos may fail on every extraction path.
 - Gemini may truncate long videos.
-- PDF extraction does not perform OCR.
+- Document conversion does not perform OCR.
 - GitHub branch names containing slashes may misresolve file paths; cloned repositories remain navigable.
 - Non-code GitHub URLs, including issues and pull requests, use normal web extraction.
 - Windows support depends on the installed external tools and browser-cookie environment.

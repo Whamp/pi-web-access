@@ -6,11 +6,12 @@ import { DEFAULT_MEDIA_SETTINGS, DEFAULT_WEB_ACCESS_SETTINGS, getWebAccessConfig
 import { settleWithAbort } from "./abort.ts";
 import { createAbortableLimiter } from "./abortable-limit.ts";
 import { extractRSCContent } from "./rsc-extract.ts";
-import { extractPDFToMarkdown, isPDF } from "./pdf-extract.ts";
+import { convertDocument, isConvertibleDocument, isPdfDocument } from "./document-converter.ts";
 import { extractGitHub } from "./github-extract.ts";
 import { isYouTubeURL, isYouTubeEnabled, extractYouTube, extractYouTubeFrame, extractYouTubeFrames, getYouTubeStreamInfo } from "./youtube-extract.ts";
 import { extractWithUrlContext, extractWithGeminiWeb } from "./gemini-url-context.ts";
 import { extractWithParallel, isParallelAvailable } from "./parallel.ts";
+import { ResponseBodyTooLargeError } from "./errors.ts";
 import { isVideoFile, extractVideo, extractVideoFrame, getLocalVideoDuration } from "./video-extract.ts";
 import { fetchRemoteUrl, validateRemoteUrl, type Lookup } from "./ssrf-protection.ts";
 import { formatSeconds } from "./utils.ts";
@@ -544,8 +545,9 @@ async function extractViaHttp(
 
 		const contentLengthHeader = response.headers.get("content-length");
 		const contentType = response.headers.get("content-type") || "";
-		const isPDFContent = isPDF(url, contentType);
-		const maxResponseSize = isPDFContent ? 20 * 1024 * 1024 : 5 * 1024 * 1024;
+		const isPdfContent = isPdfDocument(url, contentType);
+		const isDocumentContent = isConvertibleDocument(url, contentType);
+		const maxResponseSize = isPdfContent ? 20 * 1024 * 1024 : 5 * 1024 * 1024;
 		if (contentLengthHeader) {
 			const contentLength = parseInt(contentLengthHeader, 10);
 			if (contentLength > maxResponseSize) {
@@ -560,23 +562,28 @@ async function extractViaHttp(
 			}
 		}
 
-		if (isPDFContent) {
+		if (isDocumentContent) {
 			try {
-				const bytes = await readResponseBytes(response, controller.signal);
-				const pdfData = Uint8Array.from(bytes).buffer;
-				const result = await extractPDFToMarkdown(pdfData, url, { signal: controller.signal });
+				const bytes = await readResponseBytes(response, controller.signal, maxResponseSize);
+				const result = await convertDocument(bytes, url, contentType);
+				controller.signal.throwIfAborted();
 				activityMonitor.logComplete(activityId, response.status);
 				return {
 					url,
-					title: result.title,
-					content: `PDF extracted and saved to: ${result.outputPath}\n\nPages: ${result.pages}\nCharacters: ${result.chars}`,
+					title: result.title ?? extractTextTitle(result.markdown, url),
+					content: result.markdown,
 					error: null,
 				};
 			} catch (err) {
 				if (controller.signal.aborted) throw err;
+				if (err instanceof ResponseBodyTooLargeError) {
+					activityMonitor.logError(activityId, err.message);
+					const limitMegabytes = Math.round(maxResponseSize / 1024 / 1024);
+					return { url, title: "", content: "", error: `Response too large (limit ${limitMegabytes}MB)` };
+				}
 				const message = err instanceof Error ? err.message : String(err);
 				activityMonitor.logError(activityId, message);
-				return { url, title: "", content: "", error: `PDF extraction failed: ${message}` };
+				return { url, title: "", content: "", error: `Document extraction failed: ${message}` };
 			}
 		}
 
@@ -595,7 +602,7 @@ async function extractViaHttp(
 			};
 		}
 
-		const text = new TextDecoder().decode(await readResponseBytes(response, controller.signal));
+		const text = new TextDecoder().decode(await readResponseBytes(response, controller.signal, maxResponseSize));
 		const isHTML = contentType.includes("text/html") || contentType.includes("application/xhtml+xml");
 
 		if (!isHTML) {
@@ -647,6 +654,10 @@ async function extractViaHttp(
 
 		return { url, title: article.title || "", content: markdown, error: null };
 	} catch (err) {
+		if (err instanceof ResponseBodyTooLargeError) {
+			activityMonitor.logError(activityId, err.message);
+			return { url, title: "", content: "", error: "Response too large (limit 5MB)" };
+		}
 		const message = err instanceof Error ? err.message : String(err);
 		if (message.toLowerCase().includes("abort")) {
 			activityMonitor.logComplete(activityId, 0);
