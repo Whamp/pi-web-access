@@ -25,8 +25,15 @@ export interface SearchResponse {
 	inlineContent?: SearchInlineContent[];
 }
 
+/** Actionable non-terminal diagnostic returned while automatic provider selection continues. */
+export interface ProviderWarning {
+	provider: ResolvedSearchProvider;
+	message: string;
+}
+
 export interface AttributedSearchResponse extends SearchResponse {
 	provider: ResolvedSearchProvider;
+	warnings?: readonly ProviderWarning[];
 }
 
 export interface SearchOptions {
@@ -36,15 +43,18 @@ export interface SearchOptions {
 	signal?: AbortSignal;
 }
 
+/** Minimal host context required to resolve model credentials for model-backed search providers. */
+export type SearchExtensionContext = Pick<ExtensionContext, "modelRegistry">;
+
 export interface FullSearchOptions extends SearchOptions {
 	provider?: SearchProvider;
 	includeContent?: boolean;
-	extensionContext?: ExtensionContext;
+	extensionContext?: SearchExtensionContext;
 }
 
 export type ProviderEligibility =
-	| { eligible: true; reason?: never }
-	| { eligible: false; reason: string };
+	| { eligible: true; reason?: never; warning?: never }
+	| { eligible: false; reason: string; warning?: ProviderWarning };
 
 export interface SearchProviderRequest {
 	query: string;
@@ -52,7 +62,7 @@ export interface SearchProviderRequest {
 }
 
 export interface SearchProviderEligibilityRequest {
-	extensionContext?: ExtensionContext;
+	extensionContext?: SearchExtensionContext;
 	signal?: AbortSignal;
 }
 

@@ -259,6 +259,7 @@ Every field is optional. If the file is missing, Web Access uses the defaults sh
   },
   "allowBrowserCookies": false,
   "searchModel": "gemini-3-flash-preview",
+  "openaiSearchModel": "gpt-5.6-luna:xhigh",
   "workflow": "none",
   "curatorTimeoutSeconds": 20,
   "githubClone": {
@@ -287,6 +288,8 @@ Every field is optional. If the file is missing, Web Access uses the defaults sh
 ```
 
 The same file also supports optional `openaiApiKey`, `braveApiKey`, `exaApiKey`, `parallelApiKey`, `tavilyApiKey`, `perplexityApiKey`, `geminiApiKey`, `geminiBaseUrl`, `cloudflareApiKey`, `chromeProfile`, and `summaryModel` fields. The legacy `searchProvider` field remains accepted for compatibility; `provider` is the current default-provider field. All credentials and `summaryModel` are unset by default.
+
+`openaiSearchModel` selects the model that the OpenAI search provider uses internally; it is independent of the Pi model that calls `web_search`. Use an unqualified Pi model selector such as `gpt-5.6-luna` or `gpt-5.6-luna:xhigh`. Omitting the reasoning suffix uses the model's default effort. Web Access validates the model and reasoning level against Pi's generated catalog, prefers an `openai-codex` subscription over a direct OpenAI API key, and never substitutes another model. An invalid selector makes explicit OpenAI searches fail with corrective guidance. Automatic provider selection instead returns the guidance as a provider warning and continues to the next provider.
 
 Set `webSearch.enabled` to `false` to unregister the `web_search` tool while keeping content-fetching tools available.
 

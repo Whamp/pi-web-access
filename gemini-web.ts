@@ -17,10 +17,12 @@ const USER_AGENT =
 	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
 const MODEL_HEADER_NAME = "x-goog-ext-525001261-jspb";
+const DEFAULT_MODEL = "gemini-2.5-flash";
+const DEFAULT_MODEL_HEADER = '[1,null,null,null,"9ec249fc9ad08861",null,null,0,[4]]';
 const MODEL_HEADERS: Record<string, string> = {
 	"gemini-3-pro": '[1,null,null,null,"9d8ca3786ebdfbea",null,null,0,[4]]',
 	"gemini-2.5-pro": '[1,null,null,null,"4af6c7f5da75d65d",null,null,0,[4]]',
-	"gemini-2.5-flash": '[1,null,null,null,"9ec249fc9ad08861",null,null,0,[4]]',
+	[DEFAULT_MODEL]: DEFAULT_MODEL_HEADER,
 };
 
 const REQUIRED_COOKIES = ["__Secure-1PSID", "__Secure-1PSIDTS"];
@@ -81,7 +83,7 @@ export async function queryWithCookies(
 	cookieMap: CookieMap,
 	options: GeminiWebOptions = {},
 ): Promise<string> {
-	const model = options.model && MODEL_HEADERS[options.model] ? options.model : "gemini-2.5-flash";
+	const model = options.model !== undefined && MODEL_HEADERS[options.model] !== undefined ? options.model : DEFAULT_MODEL;
 	const timeoutMs = options.timeoutMs ?? 120000;
 
 	let fullPrompt = prompt;
@@ -91,8 +93,8 @@ export async function queryWithCookies(
 
 	const result = await runGeminiWebOnce(fullPrompt, cookieMap, model, options.files, timeoutMs, options.signal);
 
-	if (isModelUnavailable(result.errorCode) && model !== "gemini-2.5-flash") {
-		const fallback = await runGeminiWebOnce(fullPrompt, cookieMap, "gemini-2.5-flash", options.files, timeoutMs, options.signal);
+	if (isModelUnavailable(result.errorCode) && model !== DEFAULT_MODEL) {
+		const fallback = await runGeminiWebOnce(fullPrompt, cookieMap, DEFAULT_MODEL, options.files, timeoutMs, options.signal);
 		if (fallback.errorMessage) throw new Error(fallback.errorMessage);
 		if (!fallback.text) throw new Error("Gemini Web returned empty response (fallback model)");
 		return fallback.text;
@@ -133,6 +135,7 @@ async function runGeminiWebOnce(
 	params.set("at", accessToken);
 	params.set("f.req", fReq);
 
+	const selectedModelHeader = MODEL_HEADERS[model] ?? DEFAULT_MODEL_HEADER;
 	const res = await fetchOwnedResponse(GEMINI_STREAM_GENERATE_URL, {
 		method: "POST",
 		headers: {
@@ -143,7 +146,7 @@ async function runGeminiWebOnce(
 			"x-same-domain": "1",
 			"user-agent": USER_AGENT,
 			cookie: cookieHeader,
-			[MODEL_HEADER_NAME]: MODEL_HEADERS[model],
+			[MODEL_HEADER_NAME]: selectedModelHeader,
 		},
 		body: params.toString(),
 	}, effectiveSignal);

@@ -229,10 +229,11 @@ function extractSourceUrls(markdown: string): SearchResult[] {
 	const seen = new Set<string>();
 	const linkRegex = /\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g;
 	for (const match of markdown.matchAll(linkRegex)) {
+		const title = match[1];
 		const url = match[2];
-		if (seen.has(url)) continue;
+		if (title === undefined || url === undefined || seen.has(url)) continue;
 		seen.add(url);
-		results.push({ title: match[1], url, snippet: "" });
+		results.push({ title, url, snippet: "" });
 	}
 	return results;
 }

@@ -1,4 +1,4 @@
-import { stream, type Message, type Model } from "@earendil-works/pi-ai/compat";
+import { stream, type Api, type Message, type Model } from "@earendil-works/pi-ai/compat";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { settleWithAbort } from "./abort.ts";
 import { loadEnabledModelPatterns, modelMatchesEnabledPatterns } from "./summary-model-scope.ts";
@@ -43,9 +43,8 @@ function summarizeQueryResult(result: QueryResultData): string {
 	}
 
 	lines.push("Sources:");
-	for (let i = 0; i < result.results.length; i++) {
-		const source = result.results[i];
-		lines.push(`${i + 1}. ${source.title} — ${source.url}`);
+	for (const [index, source] of result.results.entries()) {
+		lines.push(`${index + 1}. ${source.title} — ${source.url}`);
 	}
 
 	return lines.join("\n");
@@ -70,9 +69,9 @@ export function buildSummaryPrompt(results: QueryResultData[], feedback?: string
 	sections.push("");
 	sections.push("<search_results>");
 
-	for (let i = 0; i < results.length; i++) {
-		sections.push(`\n[Result ${i + 1}]`);
-		sections.push(summarizeQueryResult(results[i]));
+	for (const [index, result] of results.entries()) {
+		sections.push(`\n[Result ${index + 1}]`);
+		sections.push(summarizeQueryResult(result));
 	}
 
 	sections.push("\n</search_results>");
@@ -194,14 +193,14 @@ async function resolveSummaryModelCandidates(
 	ctx: SummaryGenerationContext,
 	modelOverride?: string,
 	signal?: AbortSignal,
-): Promise<{ candidates: Array<{ model: Model; apiKey: string; headers?: Record<string, string> }>; errors: string[] }> {
+): Promise<{ candidates: Array<{ model: Model<Api>; apiKey: string; headers?: Record<string, string> }>; errors: string[] }> {
 	const enabledModelPatterns = loadEnabledModelPatterns(ctx);
 	const specs: Array<{ provider: string; id: string }> = [];
 	const normalizedOverride = typeof modelOverride === "string" ? modelOverride.trim() : "";
 	if (normalizedOverride.length > 0) specs.push(parseModelSelector(normalizedOverride));
 	specs.push(...PREFERRED_SUMMARY_MODELS);
 
-	const candidates: Array<{ model: Model; apiKey: string; headers?: Record<string, string> }> = [];
+	const candidates: Array<{ model: Model<Api>; apiKey: string; headers?: Record<string, string> }> = [];
 	const errors: string[] = [];
 	const seen = new Set<string>();
 	for (const spec of specs) {

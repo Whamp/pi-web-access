@@ -1,12 +1,12 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { Box, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { StringEnum, complete, type Model } from "@earendil-works/pi-ai/compat";
+import { StringEnum, complete, type Api, type ImageContent, type Model, type TextContent } from "@earendil-works/pi-ai/compat";
 import { fetchAllContent, type ExtractedContent } from "./extract.ts";
 import { normalizeFetchContentParams } from "./fetch-params.ts";
 import { clearCloneCache } from "./github-extract.ts";
-import type { ResolvedSearchProvider, SearchProvider, SearchResult, WebSearch } from "./search-provider.ts";
-import { createConfiguredWebSearch } from "./web-search.ts";
+import type { ProviderWarning, ResolvedSearchProvider, SearchOptions, SearchProvider, SearchResult, WebSearch } from "./search-provider.ts";
+import { AutoSearchError, createConfiguredWebSearch, NoProviderAvailableError } from "./web-search.ts";
 import { formatSeconds } from "./utils.ts";
 import { getWebAccessConfiguration, type MediaSettings, type WebAccessSettings } from "./configuration.ts";
 import {
@@ -37,12 +37,12 @@ import { loadEnabledModelPatterns, modelMatchesEnabledPatterns } from "./summary
 /** Shared collapsed/expanded renderer for an error/cancel plan produced by
  * buildSearchErrorPlan(). Used by every tool renderResult's error branch so
  * Ctrl+O (app.tools.expand) reveals diagnostics instead of a dead-end single line. */
-function renderSearchErrorPlan(plan: SearchErrorPlan, expanded: boolean, theme: { fg: (key: string, s: string) => string; bg: (key: string, s: string) => string }) {
+function renderSearchErrorPlan(plan: SearchErrorPlan, expanded: boolean, theme: Pick<Theme, "fg" | "bg">) {
 	if (expanded) {
 		return new Text(plan.expanded.map((l, i) => i === 0 ? theme.fg("error", l) : theme.fg("toolOutput", l)).join("\n"), 0, 0);
 	}
 	const box = new Box(1, 0, (t) => theme.bg("toolErrorBg", t));
-	box.addChild(new Text(theme.fg("error", plan.expanded[0]), 0, 0));
+	box.addChild(new Text(theme.fg("error", plan.expanded[0] ?? "Unknown search error"), 0, 0));
 	for (const line of plan.collapsed) {
 		box.addChild(new Text(theme.fg("dim", line), 0, 0));
 	}
@@ -82,6 +82,18 @@ function normalizeProviderInput(value: unknown): SearchProvider | undefined {
 	const normalized = value.trim().toLowerCase();
 	const valid: SearchProvider[] = ["auto", "openai", "brave", "parallel", "tavily", "exa", "perplexity", "gemini"];
 	return valid.includes(normalized as SearchProvider) ? normalized as SearchProvider : "auto";
+}
+
+function normalizeRecencyFilter(value: unknown): SearchOptions["recencyFilter"] {
+	switch (value) {
+		case "day":
+		case "week":
+		case "month":
+		case "year":
+			return value;
+		default:
+			return undefined;
+	}
 }
 
 interface ResolvedAgentWorkflow {
@@ -222,6 +234,14 @@ function formatSearchSummary(results: SearchResult[], answer: string): string {
 	let output = answer ? `${answer}\n\n---\n\n**Sources:**\n` : "";
 	output += results.map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}`).join("\n\n");
 	return output;
+}
+
+function appendProviderWarnings(target: ProviderWarning[], incoming: readonly ProviderWarning[] | undefined): void {
+	for (const warning of incoming ?? []) {
+		if (!target.some((existing) => existing.provider === warning.provider && existing.message === warning.message)) {
+			target.push(warning);
+		}
+	}
 }
 
 function duplicateQuerySet(results: QueryResultData[]): Set<string> {
@@ -386,12 +406,12 @@ function updateWidget(ctx: ExtensionContext): void {
 			(resetMs > 0 ? theme.fg("dim", ` (resets in ${resetSec}s)`) : ""),
 	);
 
-	ctx.ui.setWidget("web-activity", new Text(lines.join("\n"), 0, 0));
+	ctx.ui.setWidget("web-activity", lines);
 }
 
 function formatEntryLine(
 	entry: ActivityEntry,
-	theme: { fg: (color: string, text: string) => string },
+	theme: Pick<Theme, "fg">,
 ): string {
 	const typeStr = entry.type === "api" ? "API" : "GET";
 	const target =
@@ -563,6 +583,7 @@ export default function (pi: ExtensionAPI) {
 		workflow?: SummaryWorkflow;
 		approvedSummary?: string;
 		summaryMeta?: SummaryMeta;
+		warnings?: readonly ProviderWarning[];
 	}
 
 	function normalizeSummaryMeta(meta: SummaryMeta | undefined, summaryText: string): SummaryMeta {
@@ -630,7 +651,7 @@ export default function (pi: ExtensionAPI) {
 	async function resolveFirstAvailableModel(
 		ctx: SummaryGenerationContext,
 		candidates: Array<{ provider: string; id: string }>,
-	): Promise<{ model: Model; apiKey: string; headers?: Record<string, string> }> {
+	): Promise<{ model: Model<Api>; apiKey: string; headers?: Record<string, string> }> {
 		const enabledModelPatterns = loadEnabledModelPatterns(ctx);
 		for (const { provider, id } of candidates) {
 			const model = ctx.modelRegistry.find(provider, id);
@@ -661,11 +682,7 @@ export default function (pi: ExtensionAPI) {
 		if (response.stopReason === "aborted") throw new Error("Aborted");
 		const contentParts = Array.isArray(response.content) ? response.content : [];
 		const text = contentParts
-			.map(p => {
-				if (!p || typeof p !== "object") return "";
-				const part = p as Record<string, unknown>;
-				return typeof part.text === "string" ? part.text : "";
-			})
+			.map((part) => "text" in part && typeof part.text === "string" ? part.text : "")
 			.join("")
 			.trim();
 		if (!text) throw new Error("Rewrite returned empty response");
@@ -810,6 +827,11 @@ export default function (pi: ExtensionAPI) {
 			}
 		}
 
+		if (opts.warnings?.length) {
+			const warningText = opts.warnings.map((warning) => `- ${warning.provider}: ${warning.message}`).join("\n");
+			output = `**Provider warnings:**\n${warningText}\n\n${output}`;
+		}
+
 		const storedContent = opts.includeContent ? opts.inlineContent : undefined;
 		let searchResultId: string;
 		let contentResultId: string | null = null;
@@ -849,6 +871,7 @@ export default function (pi: ExtensionAPI) {
 				contentReady: storedContent?.filter(item => !item.error).length ?? 0,
 				contentErrors: storedContent?.filter(item => item.error).length ?? 0,
 				searchResultId,
+				...(opts.warnings?.length ? { warnings: opts.warnings } : {}),
 				...(opts.curated ? {
 					curated: true,
 					curatedFrom: opts.curatedFrom,
@@ -907,6 +930,21 @@ export default function (pi: ExtensionAPI) {
 	async function openCuratorBrowser(callId: string, pc: PendingCurate, searchesComplete = true): Promise<void> {
 		if (pendingCurates.get(callId) !== pc) return;
 		let handle: CuratorServerHandle | null = null;
+		const sendCuratorFallbackUpdate = (message: string) => {
+			const curatorUrl = handle?.url ?? pc.curatorUrl;
+			if (!curatorUrl) return;
+			pc.onUpdate?.({
+				content: [{ type: "text", text: `${message}\nOpen manually: ${curatorUrl}` }],
+				details: {
+					phase: "curator-fallback",
+					progress: searchesComplete ? 1 : 0.5,
+					curatorUrl,
+					timeoutSeconds: pc.timeoutSeconds,
+					shortcut: curateKey,
+					browserOpenError: pc.browserOpenError,
+				},
+			});
+		};
 		try {
 			pc.phase = "curating";
 
@@ -1028,7 +1066,7 @@ export default function (pi: ExtensionAPI) {
 								domainFilter: pc.domainFilter,
 								includeContent: pc.includeContent,
 								signal: addSearchSignal,
-								extensionContext: ctx,
+								extensionContext: pc.summaryContext,
 							});
 							if (pendingCurates.get(callId) !== pc) throw new Error("Curator session is no longer active.");
 							pc.searchResults.set(queryIndex, { query, answer, results, error: null, provider: actualProvider });
@@ -1073,20 +1111,6 @@ export default function (pi: ExtensionAPI) {
 				}
 			}
 			if (searchesComplete) handle.searchesDone();
-
-			const sendCuratorFallbackUpdate = (message: string) => {
-				pc.onUpdate?.({
-					content: [{ type: "text", text: `${message}\nOpen manually: ${handle.url}` }],
-					details: {
-						phase: "curator-fallback",
-						progress: searchesComplete ? 1 : 0.5,
-						curatorUrl: handle.url,
-						timeoutSeconds: pc.timeoutSeconds,
-						shortcut: curateKey,
-						browserOpenError: pc.browserOpenError,
-					},
-				});
-			};
 
 			pc.onUpdate?.({
 				content: [{ type: "text", text: searchesComplete ? "Waiting for summary approval in browser..." : "Searches streaming to browser..." }],
@@ -1133,9 +1157,9 @@ export default function (pi: ExtensionAPI) {
 	pi.registerShortcut(curateKey, {
 		description: "Review search results",
 		handler: async (ctx) => {
-			const entries = [...pendingCurates.entries()];
-			if (entries.length === 0) return;
-			const [callId, pc] = entries[entries.length - 1];
+			const entry = [...pendingCurates.entries()].at(-1);
+			if (entry === undefined) return;
+			const [callId, pc] = entry;
 
 			if (pc.phase === "searching") {
 				pc.browserPromise = openCuratorBrowser(callId, pc, false);
@@ -1223,10 +1247,10 @@ export default function (pi: ExtensionAPI) {
 			const searchResults: QueryResultData[] = [];
 			const allUrls: string[] = [];
 			const allInlineContent: ExtractedContent[] = [];
+			const providerWarnings: ProviderWarning[] = [];
 			const resolvedProvider = normalizeProviderInput(params.provider ?? workSettings.provider);
 
-			for (let i = 0; i < queryList.length; i++) {
-				const query = queryList[i];
+			for (const [i, query] of queryList.entries()) {
 
 				onUpdate?.({
 					content: [{ type: "text", text: `Searching ${i + 1}/${queryList.length}: "${query}"...` }],
@@ -1234,16 +1258,17 @@ export default function (pi: ExtensionAPI) {
 				});
 
 				try {
-					const { answer, results, inlineContent, provider } = await webSearch.search(query, {
+					const { answer, results, inlineContent, provider, warnings } = await webSearch.search(query, {
 						provider: resolvedProvider,
 						numResults: params.numResults,
-						recencyFilter: params.recencyFilter,
+						recencyFilter: normalizeRecencyFilter(params.recencyFilter),
 						domainFilter: params.domainFilter,
 						includeContent: params.includeContent,
 						signal: executionSignal,
 						extensionContext: ctx,
 					});
 
+					appendProviderWarnings(providerWarnings, warnings);
 					searchResults.push({ query, answer, results, error: null, provider });
 					for (const r of results) {
 						if (!allUrls.includes(r.url)) {
@@ -1253,6 +1278,9 @@ export default function (pi: ExtensionAPI) {
 					if (inlineContent) allInlineContent.push(...inlineContent);
 				} catch (err) {
 					if (executionSignal.aborted) throw executionSignal.reason;
+					if (err instanceof AutoSearchError || err instanceof NoProviderAvailableError) {
+						appendProviderWarnings(providerWarnings, err.warnings);
+					}
 					const message = err instanceof Error ? err.message : String(err);
 					const requestedProvider = typeof resolvedProvider === "string" && resolvedProvider !== "auto"
 						? resolvedProvider
@@ -1300,6 +1328,7 @@ export default function (pi: ExtensionAPI) {
 				workflow: workflow === "auto-summary" ? "auto-summary" : undefined,
 				approvedSummary,
 				summaryMeta,
+				warnings: providerWarnings,
 			});
 			if (resolvedWorkflow.compatibilityWarning) {
 				const textPart = searchReturn.content.find(part => part.type === "text");
@@ -1325,6 +1354,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (queryList.length === 1) {
 				const q = queryList[0];
+				if (q === undefined) return new Text(theme.fg("error", "Invalid search query"), 0, 0);
 				const display = q.length > 60 ? q.slice(0, 57) + "..." : q;
 				return new Text(theme.fg("toolTitle", theme.bold("search ")) + theme.fg("accent", `"${display}"`), 0, 0);
 			}
@@ -1619,6 +1649,12 @@ export default function (pi: ExtensionAPI) {
 			// Single URL: return content directly (possibly truncated) with contentResultId
 			if (urlList.length === 1) {
 				const result = fetchResults[0];
+				if (result === undefined) {
+					return {
+						content: [{ type: "text", text: "Error: Content retrieval returned no result." }],
+						details: { urls: urlList, urlCount: 1, successful: 0, error: "Missing fetch result", contentResultId },
+					};
+				}
 				if (result.error) {
 					return {
 						content: [{ type: "text", text: `Error: ${result.error}` }],
@@ -1637,7 +1673,7 @@ export default function (pi: ExtensionAPI) {
 						`Use ${storedResultRetrievalCall(contentResultId)} for full content.`;
 				}
 
-				const content: Array<{ type: string; text?: string; data?: string; mimeType?: string }> = [];
+				const content: Array<TextContent | ImageContent> = [];
 				if (result.frames?.length) {
 					for (const frame of result.frames) {
 						content.push({ type: "image", data: frame.data, mimeType: frame.mimeType });
@@ -1694,7 +1730,9 @@ export default function (pi: ExtensionAPI) {
 			}
 			const lines: string[] = [];
 			if (urlList.length === 1) {
-				const display = urlList[0].length > 60 ? urlList[0].slice(0, 57) + "..." : urlList[0];
+				const url = urlList[0];
+				if (url === undefined) return new Text(theme.fg("error", "Invalid fetch URL"), 0, 0);
+				const display = url.length > 60 ? url.slice(0, 57) + "..." : url;
 				lines.push(theme.fg("toolTitle", theme.bold("fetch ")) + theme.fg("accent", display));
 			} else {
 				lines.push(theme.fg("toolTitle", theme.bold("fetch ")) + theme.fg("accent", `${urlList.length} URLs`));
@@ -2125,11 +2163,11 @@ export default function (pi: ExtensionAPI) {
 
 				if (queries.length > 0) {
 					(async () => {
-						for (let qi = 0; qi < queries.length; qi++) {
+						for (const [qi, query] of queries.entries()) {
 							if (aborted || !isCommandActive()) break;
 							const requestedProvider = currentSearchProvider;
 							try {
-								const { answer, results, provider } = await webSearch.search(queries[qi], {
+								const { answer, results, provider } = await webSearch.search(query, {
 									provider: requestedProvider,
 									signal: searchAbort.signal,
 									extensionContext: ctx,
@@ -2140,12 +2178,12 @@ export default function (pi: ExtensionAPI) {
 									results: results.map(r => ({ title: r.title, url: r.url, domain: extractDomain(r.url) })),
 									provider,
 								});
-								collected.set(qi, { query: queries[qi], answer, results, error: null, provider });
+								collected.set(qi, { query, answer, results, error: null, provider });
 							} catch (err) {
 								if (aborted || !isCommandActive()) break;
 								const message = err instanceof Error ? err.message : String(err);
 								handle.pushError(qi, message, requestedProvider);
-								collected.set(qi, { query: queries[qi], answer: "", results: [], error: message, provider: requestedProvider });
+								collected.set(qi, { query, answer: "", results: [], error: message, provider: requestedProvider });
 							}
 						}
 						if (!aborted && isCommandActive()) handle.searchesDone();
@@ -2228,7 +2266,9 @@ export default function (pi: ExtensionAPI) {
 			const match = choice.match(/^\[([a-z0-9]+)\]/);
 			if (!match) return;
 
-			const selected = results.find((r) => r.id.startsWith(match[1]));
+			const selectedIdPrefix = match[1];
+			if (selectedIdPrefix === undefined) return;
+			const selected = results.find((r) => r.id.startsWith(selectedIdPrefix));
 			if (!selected) return;
 
 			const actions = ["View details", "Delete"];

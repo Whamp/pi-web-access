@@ -23,6 +23,7 @@ test("a missing configuration file loads documented defaults", async () => {
 		webSearch: { enabled: true },
 		allowBrowserCookies: false,
 		searchModel: "gemini-3-flash-preview",
+		openaiSearchModel: "gpt-5.6-luna:xhigh",
 		workflow: "none",
 		curatorTimeoutSeconds: 20,
 		githubClone: {
@@ -45,12 +46,13 @@ test("a complete valid configuration loads all known settings and compatibility 
 		openaiApiKey: "openai-secret", braveApiKey: "brave-secret", exaApiKey: "exa-secret",
 		parallelApiKey: "parallel-secret", tavilyApiKey: "tavily-secret", perplexityApiKey: "perplexity-secret",
 		geminiApiKey: "gemini-secret", geminiBaseUrl: "https://example.test/gemini/", cloudflareApiKey: "cloudflare-secret",
-		allowBrowserCookies: true, chromeProfile: " Profile 2 ", searchModel: "gemini-search", summaryModel: "openai/summary",
+		allowBrowserCookies: true, chromeProfile: " Profile 2 ", searchModel: "gemini-search",
+		openaiSearchModel: " gpt-5.4:low ", summaryModel: "openai/summary",
 		workflow: "summary-review", curatorTimeoutSeconds: 600,
 		githubClone: { enabled: false, maxRepoSizeMB: 12.5, cloneTimeoutSeconds: 7, clonePath: "/var/tmp/repos" },
 		youtube: { enabled: false, preferredModel: "youtube-model" },
 		video: { enabled: false, preferredModel: "video-model", maxSizeMB: 25 },
-		shortcuts: { curate: "ctrl+x", activity: "ctrl+y" },
+		shortcuts: { curate: "Ctrl+X", activity: "CTRL+Y" },
 		ssrf: { allowRanges: [" 198.18.0.0/15 ", "fd00::/8"] },
 	}));
 
@@ -59,6 +61,7 @@ test("a complete valid configuration loads all known settings and compatibility 
 	assert.equal(settings.searchProvider, "exa");
 	assert.equal(settings.workflow, "summary-review");
 	assert.equal(settings.chromeProfile, "Profile 2");
+	assert.equal(settings.openaiSearchModel, "gpt-5.4:low");
 	assert.equal(settings.geminiBaseUrl, "https://example.test/gemini/");
 	assert.deepEqual(settings.ssrf.allowRanges, ["198.18.0.0/15", "fd00::/8"]);
 	assert.equal(settings.webSearch.enabled, false);
@@ -76,6 +79,7 @@ const invalidCases = [
 	["nested shape", JSON.stringify({ video: [] }), "video"],
 	["nested type", JSON.stringify({ video: { enabled: "yes" } }), "video.enabled"],
 	["numeric range", JSON.stringify({ curatorTimeoutSeconds: 601 }), "curatorTimeoutSeconds"],
+	["invalid shortcut", JSON.stringify({ shortcuts: { curate: "ctrl+banana" } }), "shortcuts.curate"],
 	["invalid SSRF range", JSON.stringify({ ssrf: { allowRanges: ["0.0.0.0/0"] } }), "ssrf.allowRanges"],
 ];
 for (const [label, contents, key] of invalidCases) {
@@ -397,7 +401,7 @@ const knownTopLevel = new Set([
 	"provider", "searchProvider", "webSearch", "allowBrowserCookies", "workflow", "curatorTimeoutSeconds",
 	"githubClone", "youtube", "video", "shortcuts", "ssrf", "openaiApiKey", "braveApiKey", "exaApiKey",
 	"parallelApiKey", "tavilyApiKey", "perplexityApiKey", "geminiApiKey", "geminiBaseUrl", "cloudflareApiKey",
-	"chromeProfile", "searchModel", "summaryModel",
+	"chromeProfile", "searchModel", "openaiSearchModel", "summaryModel",
 ]);
 const nestedKnown = {
 	webSearch: new Set(["enabled"]),
@@ -408,6 +412,30 @@ const nestedKnown = {
 	ssrf: new Set(["allowRanges"]),
 };
 const nonEmptyString = fc.string({ minLength: 1 }).filter(value => value.trim().length > 0);
+const shortcutModifier = fc.constantFrom("ctrl", "shift", "alt", "super");
+const shortcutBaseKey = fc.constantFrom(
+	..."abcdefghijklmnopqrstuvwxyz0123456789",
+	..."`-=[]\\;',./!@#$%^&*()_+|~{}:<>?",
+	"escape", "esc", "enter", "return", "tab", "space", "backspace", "delete", "insert", "clear",
+	"home", "end", "pageUp", "pageDown", "up", "down", "left", "right",
+	"f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10", "f11", "f12",
+);
+const shortcutModifiers = fc.uniqueArray(shortcutModifier, { minLength: 1, maxLength: 4 });
+const canonicalShortcut = fc.oneof(
+	shortcutBaseKey,
+	fc.tuple(shortcutModifiers, shortcutBaseKey).map(([modifiers, baseKey]) => `${modifiers.join("+")}+${baseKey}`),
+);
+const validShortcut = canonicalShortcut.chain(value => fc.constantFrom(value, value.toUpperCase()));
+const invalidShortcut = fc.oneof(
+	fc.tuple(shortcutModifier, shortcutBaseKey).map(([modifier, baseKey]) => `${modifier}+${modifier}+${baseKey}`),
+	shortcutModifiers.map(modifiers => `${modifiers.join("+")}+`),
+	fc.tuple(shortcutModifier, shortcutBaseKey.filter(baseKey => baseKey !== "+"))
+		.map(([modifier, baseKey]) => `${modifier}++${baseKey}`),
+	fc.tuple(shortcutModifiers, fc.stringMatching(/^unknown[a-z]{2,8}$/))
+		.map(([modifiers, baseKey]) => `${modifiers.join("+")}+${baseKey}`),
+	fc.integer(),
+	fc.constant(null),
+);
 const unknownKey = fc.stringMatching(/^[a-z][a-zA-Z0-9]{0,12}$/);
 const unknownObject = known => fc.dictionary(unknownKey.filter(key => !known.has(key)), fc.jsonValue(), { maxKeys: 4 });
 const validKnownSettings = fc.record({
@@ -425,7 +453,7 @@ const validKnownSettings = fc.record({
 	}),
 	youtube: fc.record({ enabled: fc.boolean(), preferredModel: nonEmptyString }),
 	video: fc.record({ enabled: fc.boolean(), preferredModel: nonEmptyString, maxSizeMB: fc.integer({ min: 1, max: 10000 }) }),
-	shortcuts: fc.record({ curate: nonEmptyString, activity: nonEmptyString }),
+	shortcuts: fc.record({ curate: validShortcut, activity: validShortcut }),
 	ssrf: fc.record({ allowRanges: fc.constantFrom([], ["198.18.0.0/15"], ["fd00::/8"], ["198.18.0.0/15", "fd00::/8"]) }),
 	openaiApiKey: nonEmptyString,
 	braveApiKey: nonEmptyString,
@@ -438,6 +466,7 @@ const validKnownSettings = fc.record({
 	cloudflareApiKey: nonEmptyString,
 	chromeProfile: nonEmptyString,
 	searchModel: nonEmptyString,
+	openaiSearchModel: nonEmptyString,
 	summaryModel: nonEmptyString,
 });
 const completeValidSettings = fc.tuple(
@@ -528,8 +557,8 @@ const invalidFieldArbitraries = [
 	["video.preferredModel", invalidString.map(value => ({ video: { preferredModel: value } }))],
 	["video.maxSizeMB", invalidPositiveNumber.map(value => ({ video: { maxSizeMB: value } }))],
 	["shortcuts", invalidObject.map(value => ({ shortcuts: value }))],
-	["shortcuts.curate", invalidString.map(value => ({ shortcuts: { curate: value } }))],
-	["shortcuts.activity", invalidString.map(value => ({ shortcuts: { activity: value } }))],
+	["shortcuts.curate", invalidShortcut.map(value => ({ shortcuts: { curate: value } }))],
+	["shortcuts.activity", invalidShortcut.map(value => ({ shortcuts: { activity: value } }))],
 	["ssrf", invalidObject.map(value => ({ ssrf: value }))],
 	["ssrf.allowRanges", fc.oneof(
 		fc.string(),
@@ -539,7 +568,7 @@ const invalidFieldArbitraries = [
 		fc.dictionary(unknownKey, fc.jsonValue()),
 		fc.array(fc.constant("not-a-cidr"), { minLength: 1 }),
 	).map(value => ({ ssrf: { allowRanges: value } }))],
-	...(["openaiApiKey", "braveApiKey", "exaApiKey", "parallelApiKey", "tavilyApiKey", "perplexityApiKey", "geminiApiKey", "geminiBaseUrl", "cloudflareApiKey", "chromeProfile", "searchModel", "summaryModel"]
+	...(["openaiApiKey", "braveApiKey", "exaApiKey", "parallelApiKey", "tavilyApiKey", "perplexityApiKey", "geminiApiKey", "geminiBaseUrl", "cloudflareApiKey", "chromeProfile", "searchModel", "openaiSearchModel", "summaryModel"]
 		.map(key => [key, invalidString.map(value => ({ [key]: value }))])),
 ];
 const invalidKnownSetting = fc.oneof(...invalidFieldArbitraries.map(([key, arbitrary]) => arbitrary.map(raw => ({ key, raw }))));

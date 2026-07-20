@@ -5,7 +5,8 @@
   "description": "Web search, URL fetching, GitHub repo cloning, PDF extraction, YouTube video understanding, and local video analysis for Pi coding agent. Supports OpenAI, Brave, Parallel, Tavily, Exa, Perplexity, and Gemini.",
   "type": "module",
   "scripts": {
-    "test": "node --test"
+    "test": "npm run typecheck && node --test",
+    "typecheck": "tsc --project tsconfig.json"
   },
   "keywords": [
     "pi-package",
@@ -69,7 +70,10 @@
     "@earendil-works/pi-ai": "0.80.7",
     "@earendil-works/pi-coding-agent": "0.80.7",
     "@earendil-works/pi-tui": "0.80.7",
+    "@types/node": "24.13.3",
+    "@types/turndown": "5.0.6",
     "fast-check": "^4.9.0",
-    "typebox": "1.1.38"
+    "typebox": "1.1.38",
+    "typescript": "7.0.2"
   }
 }

@@ -144,8 +144,14 @@ function parseTimestamp(ts: string): number | null {
 	if (!isNaN(num) && num >= 0) return Math.floor(num);
 	const parts = ts.split(":").map(Number);
 	if (parts.some(p => isNaN(p) || p < 0)) return null;
-	if (parts.length === 3) return Math.floor(parts[0] * 3600 + parts[1] * 60 + parts[2]);
-	if (parts.length === 2) return Math.floor(parts[0] * 60 + parts[1]);
+	if (parts.length === 3) {
+		const [hours = 0, minutes = 0, seconds = 0] = parts;
+		return Math.floor(hours * 3600 + minutes * 60 + seconds);
+	}
+	if (parts.length === 2) {
+		const [minutes = 0, seconds = 0] = parts;
+		return Math.floor(minutes * 60 + seconds);
+	}
 	return null;
 }
 
@@ -474,6 +480,7 @@ function isLikelyJSRendered(html: string): boolean {
 	if (!bodyMatch) return false;
 
 	const bodyHtml = bodyMatch[1];
+	if (bodyHtml === undefined) return false;
 
 	// Strip tags to get text content
 	const textContent = bodyHtml
@@ -556,7 +563,8 @@ async function extractViaHttp(
 		if (isPDFContent) {
 			try {
 				const bytes = await readResponseBytes(response, controller.signal);
-				const result = await extractPDFToMarkdown(bytes.buffer, url, { signal: controller.signal });
+				const pdfData = Uint8Array.from(bytes).buffer;
+				const result = await extractPDFToMarkdown(pdfData, url, { signal: controller.signal });
 				activityMonitor.logComplete(activityId, response.status);
 				return {
 					url,
@@ -623,7 +631,7 @@ async function extractViaHttp(
 			};
 		}
 
-		const markdown = turndown.turndown(article.content);
+		const markdown = turndown.turndown(article.content ?? "");
 		activityMonitor.logComplete(activityId, response.status);
 
 		if (markdown.length < MIN_USEFUL_CONTENT) {
@@ -655,7 +663,9 @@ async function extractViaHttp(
 export function extractHeadingTitle(text: string): string | null {
 	const match = text.match(/^#{1,2}\s+(.+)/m);
 	if (!match) return null;
-	const cleaned = match[1].replace(/\*+/g, "").trim();
+	const heading = match[1];
+	if (heading === undefined) return null;
+	const cleaned = heading.replace(/\*+/g, "").trim();
 	return cleaned || null;
 }
 

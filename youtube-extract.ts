@@ -42,9 +42,9 @@ export function isYouTubeURL(url: string): { isYouTube: boolean; videoId: string
 	} catch {
 	}
 
-	const match = url.match(YOUTUBE_REGEX);
-	if (!match) return { isYouTube: false, videoId: null };
-	return { isYouTube: true, videoId: match[1] };
+	const videoId = url.match(YOUTUBE_REGEX)?.[1];
+	if (videoId === undefined) return { isYouTube: false, videoId: null };
+	return { isYouTube: true, videoId };
 }
 
 export function isYouTubeEnabled(settings: MediaSettings["youtube"] = DEFAULT_MEDIA_SETTINGS.youtube): boolean {
