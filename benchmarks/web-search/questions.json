@@ -1,0 +1,62 @@
+[
+  {
+    "id": "q01",
+    "category": "developer documentation",
+    "asOf": "2026-07-20",
+    "question": "What is the current Pi extension API for registering a custom LLM-callable tool? Give the TypeScript call shape and the execute callback signature, citing the official Pi documentation."
+  },
+  {
+    "id": "q02",
+    "category": "release lookup",
+    "asOf": "2026-07-20",
+    "question": "What were the notable changes in Node.js 24.16.0? Summarize the most important additions and cite the official release notes."
+  },
+  {
+    "id": "q03",
+    "category": "API documentation",
+    "asOf": "2026-07-20",
+    "question": "How does the OpenAI Responses API return citations from its built-in web search tool? Explain the relevant response fields and show a minimal JavaScript example using official OpenAI documentation."
+  },
+  {
+    "id": "q04",
+    "category": "language release",
+    "asOf": "2026-07-20",
+    "question": "What does TypeScript 5.9's `import defer` feature do, what restrictions does it have, and when is it useful? Cite the official TypeScript release notes."
+  },
+  {
+    "id": "q05",
+    "category": "recent software release",
+    "asOf": "2026-07-20",
+    "question": "What changed in Bun 1.3.14? Summarize the user-visible changes and cite first-party Bun sources."
+  },
+  {
+    "id": "q06",
+    "category": "site-constrained documentation",
+    "asOf": "2026-07-20",
+    "question": "Using MDN as the factual source, explain what `Promise.try()` does, how it differs from `Promise.resolve(callback())`, and its browser availability as of July 20, 2026."
+  },
+  {
+    "id": "q07",
+    "category": "language documentation",
+    "asOf": "2026-07-20",
+    "question": "How do Python 3.14 template string literals (`t`-strings) differ from f-strings, and what are they intended for? Cite official Python documentation or the accepted PEP."
+  },
+  {
+    "id": "q08",
+    "category": "API synthesis",
+    "asOf": "2026-07-20",
+    "question": "Compare OpenAI Responses API background mode with webhooks for long-running tasks. Explain what each feature does and how they can be used together, citing official documentation."
+  },
+  {
+    "id": "q09",
+    "category": "tool evaluation",
+    "asOf": "2026-07-20",
+    "question": "What are the installation and browser requirements of ogulcancelik's `web-search` agent skill, and how does its Google-to-DuckDuckGo fallback work? Cite the repository documentation or source."
+  },
+  {
+    "id": "q10",
+    "category": "database documentation",
+    "asOf": "2026-07-20",
+    "question": "Using SQLite's official documentation, explain how the `ANY` datatype behaves in a STRICT table and how that differs from an ordinary non-STRICT table."
+  }
+]
