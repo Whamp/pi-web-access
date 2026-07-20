@@ -110,6 +110,10 @@ function renderText(component) {
 test("web search metadata explains how to retrieve stored search and content results", async () => {
 	const tools = await loadRegisteredTools();
 	assert.ok(tools.webSearch);
+	assert.equal(
+		tools.webSearch.description,
+		"Search the web and return AI-synthesized answers with source citations. Results are stored under searchResultId, and fetched source content under contentResultId; retrieve either with get_search_content({ resultId }).",
+	);
 
 	for (const metadata of [tools.webSearch.description, tools.webSearch.promptSnippet]) {
 		assert.match(metadata, /searchResultId/);
