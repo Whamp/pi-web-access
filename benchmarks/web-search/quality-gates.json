@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "requiredCitationSubstrings": {
-    "q09": "ogulcancelik/agent-skills"
-  }
+  "excludedQuestionIds": ["q01", "q05", "q09"],
+  "exclusionReason": "The constrained browser path fetched GitHub content through the browser CLI instead of the skill-recommended GitHub CLI.",
+  "requiredCitationSubstrings": {}
 }

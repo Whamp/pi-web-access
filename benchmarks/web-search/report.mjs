@@ -80,8 +80,12 @@ async function main() {
 			throw new Error(`${record.questionId}: ${routeError}`);
 		}
 	}
-	const summary = summarizeBenchmarkResults(benchmarkRun.records);
-	const judgedQuality = resolveTournamentResults(judgeRun.results, privateAnswerMap);
+	const excludedQuestionIds = new Set(qualityGates.excludedQuestionIds ?? []);
+	const includedQuestions = benchmarkRun.questions.filter(question => !excludedQuestionIds.has(question.id));
+	const includedRecords = benchmarkRun.records.filter(record => !excludedQuestionIds.has(record.questionId));
+	const summary = summarizeBenchmarkResults(includedRecords);
+	const judgedQuality = resolveTournamentResults(judgeRun.results, privateAnswerMap)
+		.filter(result => !excludedQuestionIds.has(result.id));
 	const quality = judgedQuality.map(result => {
 		const requiredCitation = qualityGates.requiredCitationSubstrings?.[result.id];
 		if (!requiredCitation) {
@@ -118,7 +122,7 @@ async function main() {
 	const scoreTotals = Object.fromEntries(["incumbent", "browser"].map(system => [system,
 		Object.fromEntries(dimensions.map(dimension => [dimension, []])),
 	]));
-	for (const result of judgeRun.results) {
+	for (const result of judgeRun.results.filter(item => !excludedQuestionIds.has(item.id))) {
 		for (const judge of [result.openai, result.glm]) {
 			if (!judge) {
 				continue;
@@ -148,7 +152,7 @@ async function main() {
 		}
 	}
 
-	const perQuestion = benchmarkRun.questions.map(question => {
+	const perQuestion = includedQuestions.map(question => {
 		const records = Object.fromEntries(["incumbent", "browser"].map(system => [system,
 			benchmarkRun.records.find(record => record.questionId === question.id && record.system === system),
 		]));
@@ -190,7 +194,8 @@ async function main() {
 	const toolFailureNote = toolFailures.length === 0
 		? "No tool calls failed during the pilot."
 		: `${toolFailures.length} tool calls failed and recovered during the pilot (${toolFailureLocations}). Their retries remain in the measured time and token totals.`;
-	const questionCount = benchmarkRun.questions.length;
+	const collectedQuestionCount = benchmarkRun.questions.length;
+	const questionCount = includedQuestions.length;
 	const judgeUsage = judgeRun.usage ?? { tokens: null, cost: null };
 	const judgeUsageSentence = typeof judgeUsage.tokens === "number" && typeof judgeUsage.cost === "number"
 		? `The judging itself used ${formatNumber(judgeUsage.tokens)} tokens and about $${judgeUsage.cost.toFixed(3)}.`
@@ -214,7 +219,7 @@ async function main() {
 			rawAverageJudgeScores: averageScores,
 			gates: qualityGates,
 			judgeWorkflow: judgeUsage,
-			coverage: judgeRun.coverage,
+			coverage: { ...judgeRun.coverage, analyzedPairs: questionCount },
 		},
 		systems: summary,
 		toolFailures,
@@ -227,7 +232,7 @@ async function main() {
 
 ## Bottom line
 
-The browser skill produced the preferred final answer on **${qualityCounts.browser}/${questionCount}** questions; the incumbent OpenAI path won **${qualityCounts.incumbent}/${questionCount}**, with **${qualityCounts.tie} ${qualityCounts.tie === 1 ? "tie" : "ties"}**. Both systems completed every question.
+After excluding the three GitHub-fetch questions, the browser skill produced the preferred final answer on **${qualityCounts.browser}/${questionCount}** questions; the incumbent OpenAI path won **${qualityCounts.incumbent}/${questionCount}**, with **${qualityCounts.tie} ${qualityCounts.tie === 1 ? "tie" : "ties"}**. Both systems completed every retained question.
 
 That quality gain was not token-efficient in the requesting chat. The browser path used **${formatNumber(browser.agentTokens)}** requesting-agent tokens versus **${formatNumber(incumbent.agentTokens)}** for the incumbent (**${formatPercent(percentDifference(browser.agentTokens, incumbent.agentTokens))}**). Even after adding the incumbent's captured hidden OpenAI search usage, the browser path used **${formatPercent(percentDifference(browser.knownModelTokens, incumbent.knownModelTokens))}** more known model tokens: **${formatNumber(browser.knownModelTokens)}** versus **${formatNumber(incumbent.knownModelTokens)}**.
 
@@ -235,12 +240,12 @@ That quality gain was not token-efficient in the requesting chat. The browser pa
 
 ## Controlled setup
 
-- ${questionCount} fixed web-research questions; one run per system and question.
+- ${collectedQuestionCount} fixed web-research questions were collected; ${questionCount} are analyzed after excluding ${[...excludedQuestionIds].join(", ")}.
 - Same requesting model: \`${benchmarkRun.model}:${benchmarkRun.thinking}\`.
 - Incumbent: this repository's registered tools. Every recorded search call was validated as \`provider: "openai"\` and \`workflow: "none"\`.
-- Browser: ogulcancelik/agent-skills at \`${benchmarkRun.candidate.commit}\`, used through its documented skill and CLI.
+- Browser: ogulcancelik/agent-skills at \`${benchmarkRun.candidate.commit}\`, with the benchmark forcing search and retrieval through its CLI.
 - Fresh in-memory Pi session for every answer; path order alternated by question.
-- ${browserColdStarts} recorded browser cold start; the remaining browser runs were warm.
+- All retained browser runs were warm; the excluded q01 run contained the recorded cold start.
 - Two anonymous judges per answer pair (OpenAI + GLM); adjudication resolved ${judgeRun.coverage.disputes} ${judgeRun.coverage.disputes === 1 ? "disagreement" : "disagreements"}.
 
 ## System measurements
@@ -269,7 +274,7 @@ The incumbent's hidden search-provider token count was captured from the OpenAI 
 | Tie | ${qualityCounts.tie} |
 | Unresolved | ${qualityCounts.unresolved} |
 
-The required-source gate corrected q09: both systems answered from a different, similarly named repository and therefore failed that question. Where the judges separated the remaining pairs, browser answers were usually more complete and better sourced. ${judgeUsageSentence} Judge usage is excluded from both systems' measurements.
+Where the judges separated the retained pairs, browser answers were usually more complete and better sourced. ${judgeUsageSentence} That figure covers judging the original ten pairs; judge usage is excluded from both systems' measurements.
 
 ## Per-question results
 
@@ -279,12 +284,12 @@ ${perQuestion.map(item => `| ${item.id} — ${item.category} | ${item.winner} | 
 
 ## Important limits
 
-- This is a 10-question pilot, not a statistically stable benchmark.
+- This is a seven-question recalculation of a ten-question pilot, not a statistically stable benchmark.
 - Questions emphasize technical documentation and release research; other search workloads may behave differently.
 - Each pair ran once. Search results, model behavior, and network conditions can vary.
 - The incumbent was specifically OpenAI, not the full automatic provider chain.
 - The candidate repository has no lockfile. This benchmark supplied a committed lockfile and used a clean \`npm ci\` before collection.
-- The browser path was tested as the published skill. A purpose-built internal adapter could use fewer turns and avoid printing large pages into context.
+- The original browser prompt incorrectly prohibited \`curl\`, \`wget\`, and other retrieval routes even though the skill recommends \`gh\` for GitHub and \`curl\` for simple URLs. Excluding the three direct-GitHub questions removes the clearest distortion, but the remaining comparison is still provisional rather than a faithful as-published test.
 - ${toolFailureNote}
 
 ## Evidence

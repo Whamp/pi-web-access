@@ -73,7 +73,7 @@ The workflow returns one versioned object containing both initial judgments and 
 
 The pilot's 20 initial judgments used 968,231 tokens. A 150,000-token soft gate did not prevent concurrent in-flight calls from overshooting, so budget this stage separately from the systems being compared.
 
-Judges receive only anonymous answers. Do not give them `pilot.map.json`. [`quality-gates.json`](./quality-gates.json) applies deterministic required-source checks after judging; this catches answers that confidently cite the wrong project.
+Judges receive only anonymous answers. Do not give them `pilot.map.json`. [`quality-gates.json`](./quality-gates.json) records post-collection exclusions and any deterministic source checks. The current report excludes q01, q05, and q09 because the constrained browser path fetched GitHub content through the browser CLI instead of following the skill's recommendation to use GitHub CLI.
 
 ## Generate the report
 
