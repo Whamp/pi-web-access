@@ -1179,7 +1179,7 @@ export default function (pi: ExtensionAPI) {
 		name: "web_search",
 		label: "Web Search",
 		description:
-			`Search the web using OpenAI, Brave, Parallel, Tavily, Exa, Perplexity, or Gemini. Returns an AI-synthesized answer with source citations. OpenAI web_search uses a Codex subscription or OpenAI API key. For comprehensive research, prefer queries (plural) with 2-4 varied angles over a single query — each query gets its own synthesized answer, so varying phrasing and scope gives much broader coverage. When includeContent is true, full page content is fetched before the tool returns. Agent searches never open the browser curator; use /websearch for deliberate browser curation or workflow "auto-summary" for a model-generated summary. Provider auto-selects: OpenAI when suitable and available, then Exa, Brave, Parallel, Tavily, Perplexity, Gemini API, then Gemini Web. Search results are stored under searchResultId and fetched source content under contentResultId; retrieve either with get_search_content({ resultId }).`,
+			`Search the web and return AI-synthesized answers with source citations. Results are stored under searchResultId, and fetched source content under contentResultId; retrieve either with get_search_content({ resultId }).`,
 		promptSnippet:
 			"Use for web research questions. Prefer {queries:[...]} with 2-4 varied angles over a single query for broader coverage. Retrieve stored searchResultId or contentResultId references with get_search_content({ resultId }).",
 		parameters: Type.Object({
