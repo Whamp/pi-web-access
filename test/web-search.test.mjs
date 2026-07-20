@@ -169,6 +169,41 @@ test("a saved Brave selection stays strict when its key is removed", async () =>
 	assert.ok(PROVIDER_NAMES.every((name) => ineligible.providers[name].attempts() === 0));
 });
 
+test("auto returns actionable provider warnings while continuing to the next provider", async () => {
+	const warning = {
+		provider: "openai",
+		message: "Invalid openaiSearchModel. Set it to an available OpenAI model.",
+	};
+	const { callLog, webSearch } = createFixture({
+		openai: { eligibility: { eligible: false, reason: warning.message, warning } },
+	});
+
+	const result = await webSearch.search("query", { provider: "auto" });
+
+	assert.equal(result.provider, "exa");
+	assert.deepEqual(result.warnings, [warning]);
+	assert.deepEqual(callLog, ["exa"]);
+});
+
+test("auto preserves provider warnings when every fallback is ineligible", async () => {
+	const warning = {
+		provider: "openai",
+		message: "Invalid openaiSearchModel. Set it to an available OpenAI model.",
+	};
+	const overrides = Object.fromEntries(PROVIDER_NAMES.map((name) => [
+		name,
+		{ eligibility: name === "openai"
+			? { eligible: false, reason: warning.message, warning }
+			: { eligible: false, reason: `${name} unavailable` } },
+	]));
+	const { webSearch } = createFixture(overrides);
+
+	await assert.rejects(webSearch.search("query", { provider: "auto" }), (error) => {
+		assert.deepEqual(error.warnings, [warning]);
+		return true;
+	});
+});
+
 test("auto uses fixed order, skips ineligible providers, and continues after provider-owned aborts", async () => {
 	const { callLog, webSearch } = createFixture({
 		openai: { error: new Error("OpenAI failed") },

@@ -154,6 +154,26 @@ test("web_search defaults to non-curated execution even when UI is available", a
 	assert.equal(runtime.notifications.length, 0);
 });
 
+test("automatic search returns one visible structured warning for an invalid OpenAI model", async () => {
+	installSearchResponse();
+	const availableCodexModel = { provider: "openai-codex", id: "gpt-5.6-luna", thinkingLevelMap: { xhigh: "xhigh" } };
+	const runtime = await loadRuntime({ openaiSearchModel: "gpt-99-search:xhigh" }, {
+		getAvailable: () => [availableCodexModel],
+		find: (provider, id) => provider === availableCodexModel.provider && id === availableCodexModel.id
+			? availableCodexModel
+			: undefined,
+		getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "codex-test-key" }),
+	});
+
+	const result = await executeSearch(runtime, { queries: ["first", "second"], provider: "auto" });
+
+	assert.equal(result.details.warnings.length, 1);
+	assert.equal(result.details.warnings[0].provider, "openai");
+	assert.match(result.details.warnings[0].message, /gpt-99-search:xhigh/);
+	assert.equal(result.content[0].text.match(/gpt-99-search:xhigh/g)?.length, 1);
+	assert.match(result.content[0].text, /Article/);
+});
+
 test("registered web_search uses the saved startup provider when the call omits one", async () => {
 	const requests = installSearchResponse();
 	const runtime = await loadRuntime({ provider: "brave" });
@@ -228,10 +248,11 @@ test("auto-summary falls back for non-cancellation authentication errors contain
 test("session replacement terminates provider authentication", async () => {
 	const authStarted = deferred();
 	const authGate = deferred();
+	const searchModel = { provider: "openai-codex", id: "gpt-5.6-luna", reasoning: true, thinkingLevelMap: { xhigh: "xhigh" } };
 	let authCalls = 0;
 	const runtime = await loadRuntime({}, {
-		getAvailable: () => [],
-		find: () => undefined,
+		getAvailable: () => [searchModel],
+		find: (provider, id) => provider === searchModel.provider && id === searchModel.id ? searchModel : undefined,
 		getApiKeyAndHeaders: async () => {
 			authCalls += 1;
 			authStarted.resolve();

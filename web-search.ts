@@ -9,6 +9,7 @@ import type {
 	FullSearchOptions,
 	ProviderEligibility,
 	ProviderEligibilityByName,
+	ProviderWarning,
 	ResolvedSearchProvider,
 	SearchProviders,
 	WebSearch,
@@ -52,25 +53,35 @@ export interface AutoSearchFailure {
 	error: unknown;
 }
 
+/** Aggregates failed automatic provider attempts and any warnings collected before termination. */
 export class AutoSearchError extends Error {
 	readonly failures: readonly AutoSearchFailure[];
+	readonly warnings: readonly ProviderWarning[];
 
-	constructor(failures: AutoSearchFailure[]) {
+	constructor(failures: AutoSearchFailure[], warnings: readonly ProviderWarning[] = []) {
 		super(`Auto provider search failed:\n  - ${failures.map((failure) => `${failure.label}: ${errorMessage(failure.error)}`).join("\n  - ")}`);
 		this.name = "AutoSearchError";
 		this.failures = failures;
+		this.warnings = warnings;
 	}
 }
 
-function noProviderAvailableError(): Error {
-	return new Error(
-		"No search provider available. Either:\n" +
-		"  1. Use /login to sign in with a Codex subscription for OpenAI web search\n" +
-		`  2. Set openaiApiKey, braveApiKey, parallelApiKey, tavilyApiKey, perplexityApiKey, exaApiKey, geminiApiKey, or cloudflareApiKey in ${getWebAccessConfiguration().sourcePath}\n` +
-		"  3. Set OPENAI_API_KEY, BRAVE_API_KEY, PARALLEL_API_KEY, TAVILY_API_KEY, EXA_API_KEY, PERPLEXITY_API_KEY, GEMINI_API_KEY, or CLOUDFLARE_API_KEY env vars\n" +
-		"  4. Set GOOGLE_GEMINI_BASE_URL with CLOUDFLARE_API_KEY for Cloudflare AI Gateway routing\n" +
-		"  5. Sign into gemini.google.com in a supported Chromium-based browser",
-	);
+/** Reports that automatic selection exhausted all providers while preserving non-terminal warnings. */
+export class NoProviderAvailableError extends Error {
+	readonly warnings: readonly ProviderWarning[];
+
+	constructor(warnings: readonly ProviderWarning[] = []) {
+		super(
+			"No search provider available. Either:\n" +
+			"  1. Use /login to sign in with a Codex subscription for OpenAI web search\n" +
+			`  2. Set openaiApiKey, braveApiKey, parallelApiKey, tavilyApiKey, perplexityApiKey, exaApiKey, geminiApiKey, or cloudflareApiKey in ${getWebAccessConfiguration().sourcePath}\n` +
+			"  3. Set OPENAI_API_KEY, BRAVE_API_KEY, PARALLEL_API_KEY, TAVILY_API_KEY, EXA_API_KEY, PERPLEXITY_API_KEY, GEMINI_API_KEY, or CLOUDFLARE_API_KEY env vars\n" +
+			"  4. Set GOOGLE_GEMINI_BASE_URL with CLOUDFLARE_API_KEY for Cloudflare AI Gateway routing\n" +
+			"  5. Sign into gemini.google.com in a supported Chromium-based browser",
+		);
+		this.name = "NoProviderAvailableError";
+		this.warnings = warnings;
+	}
 }
 
 export function createWebSearch(providers: SearchProviders): WebSearch {
@@ -125,6 +136,7 @@ export function createWebSearch(providers: SearchProviders): WebSearch {
 			}
 
 			const failures: AutoSearchFailure[] = [];
+			const warnings: ProviderWarning[] = [];
 			for (const providerName of AUTO_PROVIDER_ORDER) {
 				throwIfCallerCancelled(options.signal);
 				if (providerName === "openai" && !shouldTryOpenAIInAuto(options)) continue;
@@ -141,11 +153,22 @@ export function createWebSearch(providers: SearchProviders): WebSearch {
 					continue;
 				}
 				throwIfCallerCancelled(options.signal);
-				if (!eligibility.eligible) continue;
+				if (!eligibility.eligible) {
+					if (eligibility.warning) {
+						warnings.push(eligibility.warning);
+					}
+					continue;
+				}
 				try {
 					const response = await settleWithAbort(() => candidate.search({ query, options }), options.signal);
 					throwIfCallerCancelled(options.signal);
-					if (response) return { ...response, provider: providerName };
+					if (response) {
+						return {
+							...response,
+							provider: providerName,
+							...(warnings.length > 0 ? { warnings } : {}),
+						};
+					}
 					failures.push({
 						provider: providerName,
 						label: candidate.label,
@@ -157,8 +180,10 @@ export function createWebSearch(providers: SearchProviders): WebSearch {
 				}
 			}
 
-			if (failures.length > 0) throw new AutoSearchError(failures);
-			throw noProviderAvailableError();
+			if (failures.length > 0) {
+				throw new AutoSearchError(failures, warnings);
+			}
+			throw new NoProviderAvailableError(warnings);
 		},
 	};
 }

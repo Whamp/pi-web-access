@@ -1,22 +1,36 @@
+import type { Api, Model, ModelThinkingLevel } from "@earendil-works/pi-ai/compat";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { activityMonitor } from "./activity.ts";
 import type { SearchOptions, SearchProviderAdapter, SearchResponse, SearchResult } from "./search-provider.ts";
-import { getWebAccessConfiguration, type WebAccessSettings } from "./configuration.ts";
+import { DEFAULT_WEB_ACCESS_SETTINGS, getWebAccessConfiguration, type WebAccessSettings } from "./configuration.ts";
 
 const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
 const CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses";
 const SEARCH_TIMEOUT_MS = 60_000;
 
-const AUTH_MODEL_CANDIDATES = [
-	{ provider: "openai-codex", models: ["gpt-5.4", "gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.2", "gpt-5.2-codex"] },
-	{ provider: "openai", models: ["gpt-5.4", "gpt-5.2", "gpt-4.1-mini", "gpt-4o"] },
-] as const;
+const DEFAULT_OPENAI_SEARCH_MODEL = DEFAULT_WEB_ACCESS_SETTINGS.openaiSearchModel;
+const REASONING_LEVELS: readonly ModelThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+type OpenAISearchSettings = Pick<WebAccessSettings, "openaiApiKey"> & Partial<Pick<WebAccessSettings, "openaiSearchModel">>;
 
 interface OpenAIAuth {
 	provider: "openai-codex" | "openai";
 	apiKey: string;
 	model: string;
+	reasoningEffort?: string;
 	headers: Record<string, string>;
+}
+
+interface ParsedModelSelector {
+	modelId: string;
+	reasoningLevel?: ModelThinkingLevel;
+}
+
+class OpenAISearchModelConfigurationError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "OpenAISearchModelConfigurationError";
+	}
 }
 
 interface NormalizedDomainFilters {
@@ -90,40 +104,189 @@ function extractAccountId(token: string): string | undefined {
 	return typeof id === "string" && id.trim().length > 0 ? id.trim() : undefined;
 }
 
-export async function resolveOpenAIAuth(ctx?: ExtensionContext, signal?: AbortSignal, settings: Pick<WebAccessSettings, "openaiApiKey"> = {}): Promise<OpenAIAuth | undefined> {
+function modelThinkingLevel(value: string): ModelThinkingLevel | undefined {
+	return REASONING_LEVELS.find((level) => level === value);
+}
+
+function invalidModelSelection(selector: string, detail: string): OpenAISearchModelConfigurationError {
+	const sourcePath = getWebAccessConfiguration().sourcePath;
+	return new OpenAISearchModelConfigurationError(
+		`Invalid openaiSearchModel "${selector}" in ${sourcePath}: ${detail} ` +
+		`Update openaiSearchModel in ${sourcePath} and restart Pi.`,
+	);
+}
+
+function parseModelSelector(selector: string): ParsedModelSelector {
+	const separator = selector.lastIndexOf(":");
+	const modelId = (separator === -1 ? selector : selector.slice(0, separator)).trim();
+	if (!modelId || modelId.includes("/")) {
+		throw invalidModelSelection(selector, "use an unqualified model[:reasoning-level] selector");
+	}
+	if (separator === -1) {
+		return { modelId };
+	}
+	const requestedLevel = selector.slice(separator + 1).trim().toLowerCase();
+	const reasoningLevel = modelThinkingLevel(requestedLevel);
+	if (!reasoningLevel) {
+		throw invalidModelSelection(
+			selector,
+			`reasoning level "${requestedLevel}" is unsupported; choose one of ${REASONING_LEVELS.join(", ")}`,
+		);
+	}
+	return { modelId, reasoningLevel };
+}
+
+function availableReasoningLevels(model: Model<Api>): readonly ModelThinkingLevel[] {
+	if (!model.reasoning) {
+		return ["off"];
+	}
+	return REASONING_LEVELS.filter((level) => {
+		const mapped = model.thinkingLevelMap?.[level];
+		if (mapped === null) {
+			return false;
+		}
+		if (level === "xhigh" || level === "max") {
+			return typeof mapped === "string";
+		}
+		return true;
+	});
+}
+
+function resolveReasoningEffort(selector: string, model: Model<Api>, level?: ModelThinkingLevel): string | undefined {
+	if (!level) {
+		return undefined;
+	}
+	const available = availableReasoningLevels(model);
+	if (!available.includes(level)) {
+		throw invalidModelSelection(
+			selector,
+			`reasoning level "${level}" is unavailable for ${model.id}; choose one of ${available.join(", ")}`,
+		);
+	}
+	if (level === "off") {
+		return model.thinkingLevelMap?.off ?? "none";
+	}
+	return model.thinkingLevelMap?.[level] ?? level;
+}
+
+function selectCatalogModel(
+	selector: string,
+	parsed: ParsedModelSelector,
+	provider: "openai-codex" | "openai",
+	models: readonly Model<Api>[],
+): Model<Api> {
+	const model = models.find((candidate) => candidate.provider === provider && candidate.id === parsed.modelId);
+	if (model) {
+		return model;
+	}
+	const available = models.filter((candidate) => candidate.provider === provider).map((candidate) => candidate.id).sort();
+	throw invalidModelSelection(
+		selector,
+		`model "${parsed.modelId}" is not in Pi's ${provider} catalog; choose one of ${available.join(", ") || "the catalogued models"}`,
+	);
+}
+
+async function resolveRegistryAuth(
+	ctx: ExtensionContext,
+	model: Model<Api>,
+	provider: "openai-codex" | "openai",
+	selector: string,
+	level?: ModelThinkingLevel,
+	signal?: AbortSignal,
+): Promise<OpenAIAuth | undefined> {
+	const reasoningEffort = resolveReasoningEffort(selector, model, level);
+	let resolved: Awaited<ReturnType<ExtensionContext["modelRegistry"]["getApiKeyAndHeaders"]>>;
+	try {
+		resolved = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+	} catch {
+		signal?.throwIfAborted();
+		return undefined;
+	}
 	signal?.throwIfAborted();
+	if (!resolved.ok || !resolved.apiKey) {
+		return undefined;
+	}
+	return {
+		provider,
+		apiKey: resolved.apiKey,
+		model: model.id,
+		reasoningEffort,
+		headers: resolved.headers ?? {},
+	};
+}
+
+/** Resolves the configured OpenAI search model and the preferred usable OpenAI credentials. */
+export async function resolveOpenAIAuth(
+	ctx?: ExtensionContext,
+	signal?: AbortSignal,
+	settings: OpenAISearchSettings = {},
+): Promise<OpenAIAuth | undefined> {
+	signal?.throwIfAborted();
+	const selector = settings.openaiSearchModel ?? DEFAULT_OPENAI_SEARCH_MODEL;
+	const parsed = parseModelSelector(selector);
 	if (ctx) {
-		const { getModel } = await import("@earendil-works/pi-ai/compat");
-		for (const candidate of AUTH_MODEL_CANDIDATES) {
-			for (const modelId of candidate.models) {
-				const model = getModel(candidate.provider, modelId);
-				if (!model) continue;
-				try {
-					const resolved = await ctx.modelRegistry.getApiKeyAndHeaders(model);
-					signal?.throwIfAborted();
-					if (resolved.ok && resolved.apiKey) {
-						return {
-							provider: candidate.provider,
-							apiKey: resolved.apiKey,
-							model: modelId,
-							headers: resolved.headers ?? {},
-						};
-					}
-				} catch {
-					signal?.throwIfAborted();
-				}
+		const availableModels = ctx.modelRegistry.getAvailable();
+		const codexModels = availableModels.filter((model) => model.provider === "openai-codex");
+		if (codexModels.length > 0) {
+			const model = selectCatalogModel(selector, parsed, "openai-codex", codexModels);
+			const auth = await resolveRegistryAuth(ctx, model, "openai-codex", selector, parsed.reasoningLevel, signal);
+			if (auth) {
+				return auth;
+			}
+		}
+
+		const directModels = availableModels.filter((model) => model.provider === "openai");
+		if (directModels.length > 0) {
+			const model = selectCatalogModel(selector, parsed, "openai", directModels);
+			const auth = await resolveRegistryAuth(ctx, model, "openai", selector, parsed.reasoningLevel, signal);
+			if (auth) {
+				return auth;
 			}
 		}
 	}
 
+	const { getModel, getModels } = await import("@earendil-works/pi-ai/compat");
 	const apiKey = normalizeApiKey(process.env.OPENAI_API_KEY) ?? normalizeApiKey(settings.openaiApiKey);
-	return apiKey
-		? { provider: "openai", apiKey, model: "gpt-5.4", headers: {} }
-		: undefined;
+	if (!apiKey) {
+		const catalogModel = getModel("openai-codex", parsed.modelId) ?? getModel("openai", parsed.modelId);
+		if (!catalogModel) {
+			const available = [...getModels("openai-codex"), ...getModels("openai")]
+				.map((model) => model.id)
+				.filter((modelId, index, modelIds) => modelIds.indexOf(modelId) === index)
+				.sort();
+			throw invalidModelSelection(
+				selector,
+				`model "${parsed.modelId}" is not in Pi's OpenAI catalogs; choose one of ${available.join(", ")}`,
+			);
+		}
+		resolveReasoningEffort(selector, catalogModel, parsed.reasoningLevel);
+		return undefined;
+	}
+	const directModel = getModel("openai", parsed.modelId);
+	const model = directModel ?? selectCatalogModel(selector, parsed, "openai", getModels("openai"));
+	return {
+		provider: "openai",
+		apiKey,
+		model: model.id,
+		reasoningEffort: resolveReasoningEffort(selector, model, parsed.reasoningLevel),
+		headers: {},
+	};
 }
 
-export async function isOpenAISearchAvailable(ctx?: ExtensionContext, signal?: AbortSignal, settings: Pick<WebAccessSettings, "openaiApiKey"> = {}): Promise<boolean> {
-	return !!(await resolveOpenAIAuth(ctx, signal, settings));
+/** Reports whether the configured OpenAI search model and credentials can be resolved. */
+export async function isOpenAISearchAvailable(
+	ctx?: ExtensionContext,
+	signal?: AbortSignal,
+	settings: OpenAISearchSettings = {},
+): Promise<boolean> {
+	try {
+		return !!(await resolveOpenAIAuth(ctx, signal, settings));
+	} catch (error) {
+		if (error instanceof OpenAISearchModelConfigurationError) {
+			return false;
+		}
+		throw error;
+	}
 }
 
 function buildInstructions(options: SearchOptions): string {
@@ -301,7 +464,7 @@ export async function searchWithOpenAI(
 	query: string,
 	options: SearchOptions = {},
 	ctx?: ExtensionContext,
-	settings: Pick<WebAccessSettings, "openaiApiKey"> = {},
+	settings: OpenAISearchSettings = {},
 ): Promise<SearchResponse> {
 	const auth = await resolveOpenAIAuth(ctx, options.signal, settings);
 	if (!auth) {
@@ -329,6 +492,7 @@ export async function searchWithOpenAI(
 
 	const body = {
 		model: auth.model,
+		...(auth.reasoningEffort ? { reasoning: { effort: auth.reasoningEffort, summary: "auto" } } : {}),
 		instructions: buildInstructions(options),
 		input: [{ role: "user", content: [{ type: "input_text", text: query }] }],
 		tools: [buildWebSearchTool(options)],
@@ -378,12 +542,25 @@ export async function searchWithOpenAI(
 }
 
 /** Creates an OpenAI adapter that captures persistent credentials while preserving login and environment precedence. */
-export function createOpenAISearchProvider(settings: Pick<WebAccessSettings, "openaiApiKey">): SearchProviderAdapter<"openai"> {
+export function createOpenAISearchProvider(settings: OpenAISearchSettings): SearchProviderAdapter<"openai"> {
 	return {
 		name: "openai", label: "OpenAI",
-		eligibility: async ({ extensionContext, signal }) => await isOpenAISearchAvailable(extensionContext, signal, settings)
-			? { eligible: true }
-			: { eligible: false, reason: "OpenAI web search credentials are not configured." },
+		eligibility: async ({ extensionContext, signal }) => {
+			try {
+				return await resolveOpenAIAuth(extensionContext, signal, settings)
+					? { eligible: true }
+					: { eligible: false, reason: "OpenAI web search credentials are not configured." };
+			} catch (error) {
+				if (!(error instanceof OpenAISearchModelConfigurationError)) {
+					throw error;
+				}
+				return {
+					eligible: false,
+					reason: error.message,
+					warning: { provider: "openai", message: error.message },
+				};
+			}
+		},
 		search: ({ query, options }) => searchWithOpenAI(query, options, options.extensionContext, settings),
 	};
 }

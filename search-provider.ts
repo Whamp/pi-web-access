@@ -25,8 +25,15 @@ export interface SearchResponse {
 	inlineContent?: SearchInlineContent[];
 }
 
+/** Actionable non-terminal diagnostic returned while automatic provider selection continues. */
+export interface ProviderWarning {
+	provider: ResolvedSearchProvider;
+	message: string;
+}
+
 export interface AttributedSearchResponse extends SearchResponse {
 	provider: ResolvedSearchProvider;
+	warnings?: readonly ProviderWarning[];
 }
 
 export interface SearchOptions {
@@ -43,8 +50,8 @@ export interface FullSearchOptions extends SearchOptions {
 }
 
 export type ProviderEligibility =
-	| { eligible: true; reason?: never }
-	| { eligible: false; reason: string };
+	| { eligible: true; reason?: never; warning?: never }
+	| { eligible: false; reason: string; warning?: ProviderWarning };
 
 export interface SearchProviderRequest {
 	query: string;

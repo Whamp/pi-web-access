@@ -5,8 +5,8 @@ import { StringEnum, complete, type Model } from "@earendil-works/pi-ai/compat";
 import { fetchAllContent, type ExtractedContent } from "./extract.ts";
 import { normalizeFetchContentParams } from "./fetch-params.ts";
 import { clearCloneCache } from "./github-extract.ts";
-import type { ResolvedSearchProvider, SearchProvider, SearchResult, WebSearch } from "./search-provider.ts";
-import { createConfiguredWebSearch } from "./web-search.ts";
+import type { ProviderWarning, ResolvedSearchProvider, SearchProvider, SearchResult, WebSearch } from "./search-provider.ts";
+import { AutoSearchError, createConfiguredWebSearch, NoProviderAvailableError } from "./web-search.ts";
 import { formatSeconds } from "./utils.ts";
 import { getWebAccessConfiguration, type MediaSettings, type WebAccessSettings } from "./configuration.ts";
 import {
@@ -222,6 +222,14 @@ function formatSearchSummary(results: SearchResult[], answer: string): string {
 	let output = answer ? `${answer}\n\n---\n\n**Sources:**\n` : "";
 	output += results.map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}`).join("\n\n");
 	return output;
+}
+
+function appendProviderWarnings(target: ProviderWarning[], incoming: readonly ProviderWarning[] | undefined): void {
+	for (const warning of incoming ?? []) {
+		if (!target.some((existing) => existing.provider === warning.provider && existing.message === warning.message)) {
+			target.push(warning);
+		}
+	}
 }
 
 function duplicateQuerySet(results: QueryResultData[]): Set<string> {
@@ -563,6 +571,7 @@ export default function (pi: ExtensionAPI) {
 		workflow?: SummaryWorkflow;
 		approvedSummary?: string;
 		summaryMeta?: SummaryMeta;
+		warnings?: readonly ProviderWarning[];
 	}
 
 	function normalizeSummaryMeta(meta: SummaryMeta | undefined, summaryText: string): SummaryMeta {
@@ -810,6 +819,11 @@ export default function (pi: ExtensionAPI) {
 			}
 		}
 
+		if (opts.warnings?.length) {
+			const warningText = opts.warnings.map((warning) => `- ${warning.provider}: ${warning.message}`).join("\n");
+			output = `**Provider warnings:**\n${warningText}\n\n${output}`;
+		}
+
 		const storedContent = opts.includeContent ? opts.inlineContent : undefined;
 		let searchResultId: string;
 		let contentResultId: string | null = null;
@@ -849,6 +863,7 @@ export default function (pi: ExtensionAPI) {
 				contentReady: storedContent?.filter(item => !item.error).length ?? 0,
 				contentErrors: storedContent?.filter(item => item.error).length ?? 0,
 				searchResultId,
+				...(opts.warnings?.length ? { warnings: opts.warnings } : {}),
 				...(opts.curated ? {
 					curated: true,
 					curatedFrom: opts.curatedFrom,
@@ -1223,6 +1238,7 @@ export default function (pi: ExtensionAPI) {
 			const searchResults: QueryResultData[] = [];
 			const allUrls: string[] = [];
 			const allInlineContent: ExtractedContent[] = [];
+			const providerWarnings: ProviderWarning[] = [];
 			const resolvedProvider = normalizeProviderInput(params.provider ?? workSettings.provider);
 
 			for (let i = 0; i < queryList.length; i++) {
@@ -1234,7 +1250,7 @@ export default function (pi: ExtensionAPI) {
 				});
 
 				try {
-					const { answer, results, inlineContent, provider } = await webSearch.search(query, {
+					const { answer, results, inlineContent, provider, warnings } = await webSearch.search(query, {
 						provider: resolvedProvider,
 						numResults: params.numResults,
 						recencyFilter: params.recencyFilter,
@@ -1244,6 +1260,7 @@ export default function (pi: ExtensionAPI) {
 						extensionContext: ctx,
 					});
 
+					appendProviderWarnings(providerWarnings, warnings);
 					searchResults.push({ query, answer, results, error: null, provider });
 					for (const r of results) {
 						if (!allUrls.includes(r.url)) {
@@ -1253,6 +1270,9 @@ export default function (pi: ExtensionAPI) {
 					if (inlineContent) allInlineContent.push(...inlineContent);
 				} catch (err) {
 					if (executionSignal.aborted) throw executionSignal.reason;
+					if (err instanceof AutoSearchError || err instanceof NoProviderAvailableError) {
+						appendProviderWarnings(providerWarnings, err.warnings);
+					}
 					const message = err instanceof Error ? err.message : String(err);
 					const requestedProvider = typeof resolvedProvider === "string" && resolvedProvider !== "auto"
 						? resolvedProvider
@@ -1300,6 +1320,7 @@ export default function (pi: ExtensionAPI) {
 				workflow: workflow === "auto-summary" ? "auto-summary" : undefined,
 				approvedSummary,
 				summaryMeta,
+				warnings: providerWarnings,
 			});
 			if (resolvedWorkflow.compatibilityWarning) {
 				const textPart = searchReturn.content.find(part => part.type === "text");

@@ -4,6 +4,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { getModels } from "@earendil-works/pi-ai/compat";
 
 const braveModuleUrl = new URL("../brave.ts", import.meta.url).href;
 const exaModuleUrl = new URL("../exa.ts", import.meta.url).href;
@@ -253,7 +254,10 @@ test("OpenAI search requires web_search and maps domain filters", async () => {
 		};
 
 		const { writeFileSync } = await import("node:fs");
-		writeFileSync(process.env.PI_CODING_AGENT_DIR + "/web-search.json", JSON.stringify({ openaiApiKey: "persistent-openai-key" }));
+		writeFileSync(process.env.PI_CODING_AGENT_DIR + "/web-search.json", JSON.stringify({
+			openaiApiKey: "persistent-openai-key",
+			openaiSearchModel: "gpt-5.6-luna:xhigh",
+		}));
 		const { createWebAccessConfiguration } = await import(new URL("../configuration.ts", ${JSON.stringify(import.meta.url)}));
 		const { createOpenAISearchProvider } = await import(${JSON.stringify(openaiModuleUrl)});
 		const openAISearchProvider = createOpenAISearchProvider(createWebAccessConfiguration().current());
@@ -278,6 +282,8 @@ test("OpenAI search requires web_search and maps domain filters", async () => {
 	const output = JSON.parse(child.stdout.trim());
 	assert.equal(output.url, "https://api.openai.com/v1/responses");
 	assert.equal(output.authorization, "Bearer persistent-openai-key");
+	assert.equal(output.body.model, "gpt-5.6-luna");
+	assert.deepEqual(output.body.reasoning, { effort: "xhigh", summary: "auto" });
 	assert.equal(output.body.tool_choice, "required");
 	assert.deepEqual(output.body.include, ["web_search_call.action.sources"]);
 	assert.deepEqual(output.body.tools[0].filters, {
@@ -289,6 +295,129 @@ test("OpenAI search requires web_search and maps domain filters", async () => {
 		"https://openai.com/docs",
 		"https://openai.com/blog",
 	]);
+});
+
+test("OpenAI search prefers Codex subscription credentials over a direct API key", async () => {
+	const home = await mkdtemp(join(tmpdir(), "pi-web-access-openai-codex-preference-"));
+	const child = runChild(`
+		const { getModel } = await import("@earendil-works/pi-ai/compat");
+		const model = getModel("openai-codex", "gpt-5.6-luna");
+		const context = {
+			modelRegistry: {
+				getAvailable: () => [model],
+				getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "codex-subscription-key" }),
+			},
+		};
+		const { resolveOpenAIAuth } = await import(${JSON.stringify(openaiModuleUrl)});
+		const auth = await resolveOpenAIAuth(context, undefined, {
+			openaiApiKey: "direct-api-key",
+			openaiSearchModel: "gpt-5.6-luna:xhigh",
+		});
+		console.log(JSON.stringify(auth));
+	`, {
+		HOME: home,
+		USERPROFILE: home,
+	});
+
+	assert.equal(child.status, 0, child.stderr);
+	const auth = JSON.parse(child.stdout.trim());
+	assert.equal(auth.provider, "openai-codex");
+	assert.equal(auth.apiKey, "codex-subscription-key");
+	assert.equal(auth.model, "gpt-5.6-luna");
+	assert.equal(auth.reasoningEffort, "xhigh");
+});
+
+test("OpenAI search omits reasoning effort when the selector has no suffix", async () => {
+	const home = await mkdtemp(join(tmpdir(), "pi-web-access-openai-default-reasoning-"));
+	const child = runChild(`
+		const { resolveOpenAIAuth } = await import(${JSON.stringify(openaiModuleUrl)});
+		const auth = await resolveOpenAIAuth(undefined, undefined, {
+			openaiApiKey: "direct-api-key",
+			openaiSearchModel: "gpt-5.6-luna",
+		});
+		console.log(JSON.stringify(auth));
+	`, {
+		HOME: home,
+		USERPROFILE: home,
+	});
+
+	assert.equal(child.status, 0, child.stderr);
+	const auth = JSON.parse(child.stdout.trim());
+	assert.equal(auth.model, "gpt-5.6-luna");
+	assert.equal("reasoningEffort" in auth, false);
+});
+
+test("OpenAI rejects an invalid configured search model with corrective guidance", async () => {
+	const home = await mkdtemp(join(tmpdir(), "pi-web-access-openai-invalid-model-"));
+	const child = runChild(`
+		const { writeFileSync } = await import("node:fs");
+		writeFileSync(process.env.PI_CODING_AGENT_DIR + "/web-search.json", JSON.stringify({
+			openaiSearchModel: "gpt-99-search:xhigh",
+		}));
+		const { createWebAccessConfiguration } = await import(new URL("../configuration.ts", ${JSON.stringify(import.meta.url)}));
+		const { createOpenAISearchProvider } = await import(${JSON.stringify(openaiModuleUrl)});
+		const provider = createOpenAISearchProvider(createWebAccessConfiguration().current());
+		console.log(JSON.stringify(await provider.eligibility({})));
+	`, {
+		HOME: home,
+		USERPROFILE: home,
+		PI_CODING_AGENT_DIR: home,
+	});
+
+	assert.equal(child.status, 0, child.stderr);
+	const eligibility = JSON.parse(child.stdout.trim());
+	assert.equal(eligibility.eligible, false);
+	assert.equal(eligibility.warning.provider, "openai");
+	assert.match(eligibility.reason, /openaiSearchModel/);
+	assert.match(eligibility.reason, /gpt-99-search:xhigh/);
+	assert.match(eligibility.reason, /gpt-5\.6-luna/);
+	assert.match(eligibility.reason, /web-search\.json/);
+});
+
+test("OpenAI rejects an unsupported configured reasoning level with corrective guidance", async () => {
+	const home = await mkdtemp(join(tmpdir(), "pi-web-access-openai-invalid-reasoning-"));
+	const child = runChild(`
+		const { writeFileSync } = await import("node:fs");
+		writeFileSync(process.env.PI_CODING_AGENT_DIR + "/web-search.json", JSON.stringify({
+			openaiApiKey: "persistent-openai-key",
+			openaiSearchModel: "gpt-5.6-luna:extreme",
+		}));
+		const { createWebAccessConfiguration } = await import(new URL("../configuration.ts", ${JSON.stringify(import.meta.url)}));
+		const { createOpenAISearchProvider } = await import(${JSON.stringify(openaiModuleUrl)});
+		const provider = createOpenAISearchProvider(createWebAccessConfiguration().current());
+		console.log(JSON.stringify(await provider.eligibility({})));
+	`, {
+		HOME: home,
+		USERPROFILE: home,
+		PI_CODING_AGENT_DIR: home,
+	});
+
+	assert.equal(child.status, 0, child.stderr);
+	const eligibility = JSON.parse(child.stdout.trim());
+	assert.equal(eligibility.eligible, false);
+	assert.match(eligibility.reason, /reasoning level "extreme"/i);
+	assert.match(eligibility.reason, /xhigh/);
+	assert.match(eligibility.reason, /openaiSearchModel/);
+});
+
+test("the OpenAI search default is reconsidered when Pi catalogs a newer GPT generation", () => {
+	const newerModels = getModels("openai-codex")
+		.map((model) => model.id)
+		.filter((modelId) => {
+			const match = /^gpt-(\d+)(?:\.(\d+))?/i.exec(modelId);
+			if (!match) {
+				return false;
+			}
+			const major = Number(match[1]);
+			const minor = Number(match[2] ?? 0);
+			return major > 5 || (major === 5 && minor > 6);
+		});
+
+	assert.deepEqual(
+		newerModels,
+		[],
+		`Pi catalogs newer OpenAI Codex models (${newerModels.join(", ")}). Consider updating the default openaiSearchModel.`,
+	);
 });
 
 test("Parallel provider maps one mocked search request and response", async () => {

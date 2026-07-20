@@ -20,8 +20,16 @@ User-controlled persistent settings for Web Access, interpreted with shared defa
 An external search system that answers a web search and returns sources.
 
 **Provider eligibility**:
-Whether a search provider has the credentials or local access required to attempt a search. Eligibility does not guarantee that the search will succeed.
+Whether a search provider has the credentials, model selection, or local access required to attempt a search. Eligibility does not guarantee that the search will succeed.
 _Avoid_: Provider availability
+
+**OpenAI search model**:
+The user-configurable OpenAI model and optional reasoning level used internally by the OpenAI Search provider. It is independent of the model whose agent turn calls Web search.
+_Avoid_: Active model, synthesis model
+
+**Provider warning**:
+An actionable, non-terminal diagnostic from Automatic provider selection. It is returned to the calling agent while Web search continues with another Search provider.
+_Avoid_: Provider error
 
 **Explicit provider selection**:
 A search that names one search provider, either in the request or as the saved default. The search uses only that provider and fails if the provider is ineligible or the search fails.

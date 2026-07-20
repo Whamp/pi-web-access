@@ -40,6 +40,7 @@ export interface WebAccessSettings {
 	readonly chromeProfile?: string;
 	readonly searchProvider?: SearchProvider;
 	readonly searchModel: string;
+	readonly openaiSearchModel: string;
 	readonly summaryModel?: string;
 }
 
@@ -60,7 +61,7 @@ export interface WebAccessConfigurationOptions {
 const PROVIDERS: readonly SearchProvider[] = ["auto", "openai", "brave", "parallel", "tavily", "exa", "perplexity", "gemini"];
 const STRING_KEYS = [
 	"openaiApiKey", "braveApiKey", "exaApiKey", "parallelApiKey", "tavilyApiKey", "perplexityApiKey",
-	"geminiApiKey", "geminiBaseUrl", "cloudflareApiKey", "chromeProfile", "searchModel", "summaryModel",
+	"geminiApiKey", "geminiBaseUrl", "cloudflareApiKey", "chromeProfile", "searchModel", "openaiSearchModel", "summaryModel",
 ] as const;
 const KNOWN_KEYS = new Set([
 	"provider", "searchProvider", "webSearch", "allowBrowserCookies", "workflow", "curatorTimeoutSeconds",
@@ -87,6 +88,7 @@ export const DEFAULT_WEB_ACCESS_SETTINGS: Readonly<WebAccessSettings> = freezeSe
 	webSearch: { enabled: true },
 	allowBrowserCookies: false,
 	searchModel: "gemini-3-flash-preview",
+	openaiSearchModel: "gpt-5.6-luna:xhigh",
 	workflow: "none",
 	curatorTimeoutSeconds: 20,
 	githubClone: { enabled: true, maxRepoSizeMB: 350, cloneTimeoutSeconds: 30, clonePath: "/tmp/pi-github-repos" },
@@ -233,6 +235,9 @@ function normalize(raw: JsonObject, path: string): Readonly<WebAccessSettings> {
 		...(raw.cloudflareApiKey === undefined ? {} : { cloudflareApiKey: stringAt(raw.cloudflareApiKey, path, "cloudflareApiKey") }),
 		...(raw.chromeProfile === undefined ? {} : { chromeProfile: stringAt(raw.chromeProfile, path, "chromeProfile") }),
 		searchModel: raw.searchModel === undefined ? defaults.searchModel : stringAt(raw.searchModel, path, "searchModel"),
+		openaiSearchModel: raw.openaiSearchModel === undefined
+			? defaults.openaiSearchModel
+			: stringAt(raw.openaiSearchModel, path, "openaiSearchModel"),
 		...(raw.summaryModel === undefined ? {} : { summaryModel: stringAt(raw.summaryModel, path, "summaryModel") }),
 	};
 	return freezeSettings(settings);

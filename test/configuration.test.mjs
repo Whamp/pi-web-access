@@ -23,6 +23,7 @@ test("a missing configuration file loads documented defaults", async () => {
 		webSearch: { enabled: true },
 		allowBrowserCookies: false,
 		searchModel: "gemini-3-flash-preview",
+		openaiSearchModel: "gpt-5.6-luna:xhigh",
 		workflow: "none",
 		curatorTimeoutSeconds: 20,
 		githubClone: {
@@ -45,7 +46,8 @@ test("a complete valid configuration loads all known settings and compatibility 
 		openaiApiKey: "openai-secret", braveApiKey: "brave-secret", exaApiKey: "exa-secret",
 		parallelApiKey: "parallel-secret", tavilyApiKey: "tavily-secret", perplexityApiKey: "perplexity-secret",
 		geminiApiKey: "gemini-secret", geminiBaseUrl: "https://example.test/gemini/", cloudflareApiKey: "cloudflare-secret",
-		allowBrowserCookies: true, chromeProfile: " Profile 2 ", searchModel: "gemini-search", summaryModel: "openai/summary",
+		allowBrowserCookies: true, chromeProfile: " Profile 2 ", searchModel: "gemini-search",
+		openaiSearchModel: " gpt-5.4:low ", summaryModel: "openai/summary",
 		workflow: "summary-review", curatorTimeoutSeconds: 600,
 		githubClone: { enabled: false, maxRepoSizeMB: 12.5, cloneTimeoutSeconds: 7, clonePath: "/var/tmp/repos" },
 		youtube: { enabled: false, preferredModel: "youtube-model" },
@@ -59,6 +61,7 @@ test("a complete valid configuration loads all known settings and compatibility 
 	assert.equal(settings.searchProvider, "exa");
 	assert.equal(settings.workflow, "summary-review");
 	assert.equal(settings.chromeProfile, "Profile 2");
+	assert.equal(settings.openaiSearchModel, "gpt-5.4:low");
 	assert.equal(settings.geminiBaseUrl, "https://example.test/gemini/");
 	assert.deepEqual(settings.ssrf.allowRanges, ["198.18.0.0/15", "fd00::/8"]);
 	assert.equal(settings.webSearch.enabled, false);
@@ -397,7 +400,7 @@ const knownTopLevel = new Set([
 	"provider", "searchProvider", "webSearch", "allowBrowserCookies", "workflow", "curatorTimeoutSeconds",
 	"githubClone", "youtube", "video", "shortcuts", "ssrf", "openaiApiKey", "braveApiKey", "exaApiKey",
 	"parallelApiKey", "tavilyApiKey", "perplexityApiKey", "geminiApiKey", "geminiBaseUrl", "cloudflareApiKey",
-	"chromeProfile", "searchModel", "summaryModel",
+	"chromeProfile", "searchModel", "openaiSearchModel", "summaryModel",
 ]);
 const nestedKnown = {
 	webSearch: new Set(["enabled"]),
@@ -438,6 +441,7 @@ const validKnownSettings = fc.record({
 	cloudflareApiKey: nonEmptyString,
 	chromeProfile: nonEmptyString,
 	searchModel: nonEmptyString,
+	openaiSearchModel: nonEmptyString,
 	summaryModel: nonEmptyString,
 });
 const completeValidSettings = fc.tuple(
@@ -539,7 +543,7 @@ const invalidFieldArbitraries = [
 		fc.dictionary(unknownKey, fc.jsonValue()),
 		fc.array(fc.constant("not-a-cidr"), { minLength: 1 }),
 	).map(value => ({ ssrf: { allowRanges: value } }))],
-	...(["openaiApiKey", "braveApiKey", "exaApiKey", "parallelApiKey", "tavilyApiKey", "perplexityApiKey", "geminiApiKey", "geminiBaseUrl", "cloudflareApiKey", "chromeProfile", "searchModel", "summaryModel"]
+	...(["openaiApiKey", "braveApiKey", "exaApiKey", "parallelApiKey", "tavilyApiKey", "perplexityApiKey", "geminiApiKey", "geminiBaseUrl", "cloudflareApiKey", "chromeProfile", "searchModel", "openaiSearchModel", "summaryModel"]
 		.map(key => [key, invalidString.map(value => ({ [key]: value }))])),
 ];
 const invalidKnownSetting = fc.oneof(...invalidFieldArbitraries.map(([key, arbitrary]) => arbitrary.map(raw => ({ key, raw }))));
