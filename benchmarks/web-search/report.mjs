@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -34,7 +35,10 @@ function sanitizeText(text, candidatePath) {
 	if (typeof text !== "string") {
 		return text;
 	}
-	return candidatePath ? text.replaceAll(candidatePath, "<candidate>") : text;
+	const withoutCandidate = candidatePath ? text.replaceAll(candidatePath, "<candidate>") : text;
+	return withoutCandidate
+		.replaceAll(homedir(), "<home>")
+		.replace(/\/tmp\/pi-[A-Za-z0-9._/-]+/g, "<temp>");
 }
 
 function sanitizeArguments(args, candidatePath) {
@@ -63,6 +67,7 @@ async function main() {
 	const benchmarkRun = JSON.parse(await readFile(runPath, "utf8"));
 	const privateAnswerMap = JSON.parse(await readFile(`${runBasePath}.map.json`, "utf8"));
 	const judgeRun = JSON.parse(await readFile(`${runBasePath}.judges.json`, "utf8"));
+	const qualityGates = JSON.parse(await readFile(join(HERE, "quality-gates.json"), "utf8"));
 	if (typeof benchmarkRun.runIdentity !== "string" || benchmarkRun.runIdentity.length === 0) {
 		throw new Error("Benchmark run is missing its v2 experiment identity; rerun collection before reporting.");
 	}
@@ -76,7 +81,38 @@ async function main() {
 		}
 	}
 	const summary = summarizeBenchmarkResults(benchmarkRun.records);
-	const quality = resolveTournamentResults(judgeRun.results, privateAnswerMap);
+	const judgedQuality = resolveTournamentResults(judgeRun.results, privateAnswerMap);
+	const quality = judgedQuality.map(result => {
+		const requiredCitation = qualityGates.requiredCitationSubstrings?.[result.id];
+		if (!requiredCitation) {
+			return result;
+		}
+		const passedPositions = [0, 1].filter(position => {
+			const system = privateAnswerMap[result.id][`answer${position}`];
+			const record = benchmarkRun.records.find(item => item.questionId === result.id && item.system === system);
+			return record?.finalAnswer.toLowerCase().includes(requiredCitation.toLowerCase());
+		});
+		if (passedPositions.length === 2) {
+			return result;
+		}
+		if (passedPositions.length === 0) {
+			return {
+				...result,
+				winnerPosition: -1,
+				winnerSystem: null,
+				decision: "required-source-gate",
+				reason: `Both answers failed the required source check: ${requiredCitation}`,
+			};
+		}
+		const winnerPosition = passedPositions[0];
+		return {
+			...result,
+			winnerPosition,
+			winnerSystem: privateAnswerMap[result.id][`answer${winnerPosition}`],
+			decision: "required-source-gate",
+			reason: `Only one answer passed the required source check: ${requiredCitation}`,
+		};
+	});
 
 	const dimensions = ["correctness", "completeness", "sourceQuality", "directness"];
 	const scoreTotals = Object.fromEntries(["incumbent", "browser"].map(system => [system,
@@ -175,7 +211,8 @@ async function main() {
 		thinking: benchmarkRun.thinking,
 		quality: {
 			counts: qualityCounts,
-			averageScores,
+			rawAverageJudgeScores: averageScores,
+			gates: qualityGates,
 			judgeWorkflow: judgeUsage,
 			coverage: judgeRun.coverage,
 		},
@@ -190,9 +227,9 @@ async function main() {
 
 ## Bottom line
 
-The browser skill produced the preferred final answer on **${qualityCounts.browser}/${questionCount}** questions; the incumbent OpenAI path won **${qualityCounts.incumbent}/${questionCount}**, with **${qualityCounts.tie} tie**. Both systems completed every question.
+The browser skill produced the preferred final answer on **${qualityCounts.browser}/${questionCount}** questions; the incumbent OpenAI path won **${qualityCounts.incumbent}/${questionCount}**, with **${qualityCounts.tie} ${qualityCounts.tie === 1 ? "tie" : "ties"}**. Both systems completed every question.
 
-That quality gain was not token-efficient in the requesting chat. The browser path used **${formatNumber(browser.agentTokens)}** requesting-agent tokens versus **${formatNumber(incumbent.agentTokens)}** for the incumbent (**${formatPercent(percentDifference(browser.agentTokens, incumbent.agentTokens))}**). After adding the incumbent's captured hidden OpenAI search usage, the known totals were much closer: **${formatNumber(browser.knownModelTokens)}** versus **${formatNumber(incumbent.knownModelTokens)}** (**${formatPercent(percentDifference(browser.knownModelTokens, incumbent.knownModelTokens))}**).
+That quality gain was not token-efficient in the requesting chat. The browser path used **${formatNumber(browser.agentTokens)}** requesting-agent tokens versus **${formatNumber(incumbent.agentTokens)}** for the incumbent (**${formatPercent(percentDifference(browser.agentTokens, incumbent.agentTokens))}**). Even after adding the incumbent's captured hidden OpenAI search usage, the browser path used **${formatPercent(percentDifference(browser.knownModelTokens, incumbent.knownModelTokens))}** more known model tokens: **${formatNumber(browser.knownModelTokens)}** versus **${formatNumber(incumbent.knownModelTokens)}**.
 
 **Recommendation:** keep the incumbent as the default. Trial the browser backend as a fallback or borrow its source-selection approach, but do not promote the skill as-is on token-efficiency grounds.
 
@@ -204,7 +241,7 @@ That quality gain was not token-efficient in the requesting chat. The browser pa
 - Browser: ogulcancelik/agent-skills at \`${benchmarkRun.candidate.commit}\`, used through its documented skill and CLI.
 - Fresh in-memory Pi session for every answer; path order alternated by question.
 - ${browserColdStarts} recorded browser cold start; the remaining browser runs were warm.
-- Two anonymous judges per answer pair (OpenAI + GLM); adjudication resolved ${judgeRun.coverage.disputes} disagreements.
+- Two anonymous judges per answer pair (OpenAI + GLM); adjudication resolved ${judgeRun.coverage.disputes} ${judgeRun.coverage.disputes === 1 ? "disagreement" : "disagreements"}.
 
 ## System measurements
 
@@ -232,14 +269,7 @@ The incumbent's hidden search-provider token count was captured from the OpenAI 
 | Tie | ${qualityCounts.tie} |
 | Unresolved | ${qualityCounts.unresolved} |
 
-Average scores from the 20 initial judgments:
-
-| System | Correctness | Completeness | Source quality | Directness |
-| --- | ---: | ---: | ---: | ---: |
-| Incumbent | ${averageScores.incumbent.correctness.toFixed(2)} | ${averageScores.incumbent.completeness.toFixed(2)} | ${averageScores.incumbent.sourceQuality.toFixed(2)} | ${averageScores.incumbent.directness.toFixed(2)} |
-| Browser | ${averageScores.browser.correctness.toFixed(2)} | ${averageScores.browser.completeness.toFixed(2)} | ${averageScores.browser.sourceQuality.toFixed(2)} | ${averageScores.browser.directness.toFixed(2)} |
-
-The quality difference was mostly completeness and source selection; both systems scored highly on correctness. ${judgeUsageSentence} Judge usage is excluded from both systems' measurements.
+The required-source gate corrected q09: both systems answered from a different, similarly named repository and therefore failed that question. Where the judges separated the remaining pairs, browser answers were usually more complete and better sourced. ${judgeUsageSentence} Judge usage is excluded from both systems' measurements.
 
 ## Per-question results
 
@@ -253,7 +283,7 @@ ${perQuestion.map(item => `| ${item.id} — ${item.category} | ${item.winner} | 
 - Questions emphasize technical documentation and release research; other search workloads may behave differently.
 - Each pair ran once. Search results, model behavior, and network conditions can vary.
 - The incumbent was specifically OpenAI, not the full automatic provider chain.
-- Browser dependencies were resolved at run time because the candidate repository has no lockfile.
+- The candidate repository has no lockfile. This benchmark supplied a committed lockfile and used a clean \`npm ci\` before collection.
 - The browser path was tested as the published skill. A purpose-built internal adapter could use fewer turns and avoid printing large pages into context.
 - ${toolFailureNote}
 

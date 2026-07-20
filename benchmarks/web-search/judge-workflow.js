@@ -6,13 +6,21 @@ export const meta = {
 };
 
 const RAW_PAIRS = Array.isArray(args?.pairs) ? args.pairs : [];
-const PAIRS = RAW_PAIRS
+const INLINE_PAIRS = RAW_PAIRS
   .filter(pair => pair && typeof pair.id === 'string' && typeof pair.question === 'string'
     && typeof pair.answer0 === 'string' && typeof pair.answer1 === 'string')
   .slice(0, 20);
-if (PAIRS.length === 0) {
-  throw new Error('No valid answer pairs supplied');
+const PAIRS_PATH = typeof args?.pairsPath === 'string' ? args.pairsPath : null;
+const PATH_IDS = Array.isArray(args?.pairIds)
+  ? args.pairIds.filter(id => typeof id === 'string').slice(0, 20)
+  : [];
+const PAIR_IDS = INLINE_PAIRS.length > 0 ? INLINE_PAIRS.map(pair => pair.id) : PATH_IDS;
+if (PAIR_IDS.length === 0 || (INLINE_PAIRS.length === 0 && PAIRS_PATH === null)) {
+  throw new Error('Supply inline pairs or pairsPath with pairIds');
 }
+const PAIR_PAYLOAD = INLINE_PAIRS.length > 0
+  ? JSON.stringify(INLINE_PAIRS)
+  : `Read exactly ${PAIRS_PATH}. It contains the anonymous pairs for ids ${PAIR_IDS.join(', ')}. Do not inspect any adjacent file.`;
 
 const SCORE_SHAPE = {
   type: 'object',
@@ -42,33 +50,33 @@ const BATCH_SCHEMA = {
   properties: {
     judgments: {
       type: 'array',
-      minItems: PAIRS.length,
-      maxItems: PAIRS.length,
+      minItems: PAIR_IDS.length,
+      maxItems: PAIR_IDS.length,
       items: JUDGMENT_SHAPE,
     },
   },
   required: ['judgments'],
 };
 
-function judgePrompt(lens, pairs) {
-  return `Judge each anonymous answer pair. Do not call tools, inspect files, or infer which system wrote either answer.
+function judgePrompt(lens, pairPayload) {
+  return `Judge each anonymous answer pair. Apart from reading an explicitly supplied anonymous-pairs path, do not call tools, inspect other files, or infer which system wrote either answer.
 
 Lens: ${lens}
 
 Score correctness, completeness, authoritative citation support, and directness from 1 to 5. Penalize invented APIs, unsupported dates, mismatched citations, and evasion. Winner -1 means a genuine tie. Return exactly one judgment for every supplied id.
 
 Pairs:
-${JSON.stringify(pairs)}`;
+${pairPayload}`;
 }
 
 phase('Judge');
 const INITIAL_BATCHES = await parallel([
-  () => agent(judgePrompt('Prioritize technical correctness and whether each citation supports the nearby claim.', PAIRS), {
+  () => agent(judgePrompt('Prioritize technical correctness and whether each citation supports the nearby claim.', PAIR_PAYLOAD), {
     label: 'judge:openai',
     model: 'openai-codex/gpt-5.6-luna:xhigh',
     schema: BATCH_SCHEMA,
   }),
-  () => agent(judgePrompt('Be an independent skeptical reviewer; prioritize omissions, misleading wording, and citation quality.', PAIRS), {
+  () => agent(judgePrompt('Be an independent skeptical reviewer; prioritize omissions, misleading wording, and citation quality.', PAIR_PAYLOAD), {
     label: 'judge:glm',
     model: 'zai/glm-5.2',
     schema: BATCH_SCHEMA,
@@ -76,11 +84,10 @@ const INITIAL_BATCHES = await parallel([
 ]);
 const OPENAI_BY_ID = Object.fromEntries((INITIAL_BATCHES[0]?.judgments ?? []).map(item => [item.id, item]));
 const GLM_BY_ID = Object.fromEntries((INITIAL_BATCHES[1]?.judgments ?? []).map(item => [item.id, item]));
-const INITIAL_RESULTS = PAIRS.map(pair => ({
-  id: pair.id,
-  pair,
-  openai: OPENAI_BY_ID[pair.id] ?? null,
-  glm: GLM_BY_ID[pair.id] ?? null,
+const INITIAL_RESULTS = PAIR_IDS.map(id => ({
+  id,
+  openai: OPENAI_BY_ID[id] ?? null,
+  glm: GLM_BY_ID[id] ?? null,
 }));
 const DISPUTES = INITIAL_RESULTS.filter(item => item.openai !== null && item.glm !== null
   && item.openai.winner !== item.glm.winner);
@@ -100,11 +107,7 @@ const ADJUDICATION_SCHEMA = {
 };
 const ADJUDICATION_BATCH = DISPUTES.length === 0
   ? { judgments: [] }
-  : await agent(judgePrompt('Resolve only these disagreements conservatively. Treat earlier judgments as advice, not authority.', DISPUTES.map(item => ({
-      ...item.pair,
-      earlierOpenAI: item.openai,
-      earlierGLM: item.glm,
-    }))), {
+  : await agent(judgePrompt('Resolve only these disagreements conservatively. Treat earlier judgments as advice, not authority.', `${PAIR_PAYLOAD}\n\nDisagreements to resolve:\n${JSON.stringify(DISPUTES)}`), {
       label: 'adjudicate:disputes',
       model: 'openai-codex/gpt-5.6-sol:high',
       schema: ADJUDICATION_SCHEMA,
@@ -142,7 +145,7 @@ return {
   version: 1,
   results: RESULTS,
   coverage: {
-    intendedPairs: PAIRS.length,
+    intendedPairs: PAIR_IDS.length,
     openaiJudgments: INITIAL_RESULTS.filter(item => item.openai !== null).length,
     glmJudgments: INITIAL_RESULTS.filter(item => item.glm !== null).length,
     disputes: DISPUTES.length,
