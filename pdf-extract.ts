@@ -129,13 +129,13 @@ export async function extractPDFToMarkdown(
     lines.push("");
 
     // Content with page markers
-    for (let i = 0; i < pages.length; i++) {
-      if (i > 0) {
+    for (const [index, page] of pages.entries()) {
+      if (index > 0) {
         lines.push("");
-        lines.push(`<!-- Page ${pages[i].pageNum} -->`);
+        lines.push(`<!-- Page ${page.pageNum} -->`);
         lines.push("");
       }
-      lines.push(pages[i].text);
+      lines.push(page.text);
     }
 
     if (truncated) {

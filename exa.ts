@@ -242,11 +242,10 @@ function parseMcpResults(text: string): McpParsedResult[] | null {
 function buildAnswerFromMcpResults(results: McpParsedResult[]): string {
 	if (results.length === 0) return "";
 	const parts: string[] = [];
-	for (let i = 0; i < results.length; i++) {
-		const result = results[i];
+	for (const [index, result] of results.entries()) {
 		const snippet = result.content.replace(/\s+/g, " ").trim().slice(0, 500);
 		if (!snippet) continue;
-		const sourceTitle = result.title || `Source ${i + 1}`;
+		const sourceTitle = result.title || `Source ${index + 1}`;
 		parts.push(`${snippet}\nSource: ${sourceTitle} (${result.url})`);
 	}
 	return parts.join("\n\n");

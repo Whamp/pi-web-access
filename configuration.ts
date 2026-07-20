@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { mkdir, open, readFile, rename, stat, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
+import type { KeyId } from "@earendil-works/pi-tui";
 import { WebAccessConfigurationError } from "./errors.ts";
 import { logWarn } from "./logger.ts";
 import type { SearchProvider } from "./search-provider.ts";
@@ -26,7 +27,7 @@ export interface WebAccessSettings {
 	readonly githubClone: Readonly<{ enabled: boolean; maxRepoSizeMB: number; cloneTimeoutSeconds: number; clonePath: string }>;
 	readonly youtube: MediaSettings["youtube"];
 	readonly video: MediaSettings["video"];
-	readonly shortcuts: Readonly<{ curate: string; activity: string }>;
+	readonly shortcuts: Readonly<{ curate: KeyId; activity: KeyId }>;
 	readonly ssrf: Readonly<{ allowRanges: readonly string[] }>;
 	readonly openaiApiKey?: string;
 	readonly braveApiKey?: string;
@@ -132,6 +133,48 @@ function positiveNumberAt(value: unknown, path: string, key: string, maximum = N
 	return value;
 }
 
+function isShortcutBaseKey(value: string): boolean {
+	return /^[a-z0-9]$/.test(value)
+		|| /^[`\-=\[\]\\;',./!@#$%^&*()_+|~{}:<>?]$/.test(value)
+		|| [
+			"escape", "esc", "enter", "return", "tab", "space", "backspace", "delete", "insert", "clear",
+			"home", "end", "pageUp", "pageDown", "up", "down", "left", "right",
+			"f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10", "f11", "f12",
+		].includes(value);
+}
+
+function isShortcutKey(value: string): value is KeyId {
+	if (isShortcutBaseKey(value)) return true;
+	const hasPlusBaseKey = value.endsWith("++");
+	const separatorIndex = hasPlusBaseKey ? value.length - 2 : value.lastIndexOf("+");
+	if (separatorIndex < 1) return false;
+	const baseKey = hasPlusBaseKey ? "+" : value.slice(separatorIndex + 1);
+	if (!isShortcutBaseKey(baseKey)) return false;
+	const modifierParts = value.slice(0, separatorIndex).split("+");
+	if (modifierParts.length > 4) return false;
+	const modifiers = new Set<string>();
+	for (const modifier of modifierParts) {
+		if (!["ctrl", "shift", "alt", "super"].includes(modifier) || modifiers.has(modifier)) return false;
+		modifiers.add(modifier);
+	}
+	return true;
+}
+
+function normalizeShortcutKey(value: string): KeyId | undefined {
+	const shortcut = value.toLowerCase()
+		.replace(/pageup$/, "pageUp")
+		.replace(/pagedown$/, "pageDown");
+	return isShortcutKey(shortcut) ? shortcut : undefined;
+}
+
+function shortcutAt(value: unknown, path: string, key: string): KeyId {
+	const shortcut = normalizeShortcutKey(stringAt(value, path, key));
+	if (!shortcut) {
+		fail(path, key, "must be a valid Pi key identifier such as ctrl+shift+s");
+	}
+	return shortcut;
+}
+
 function providerAt(value: unknown, path: string, key: string): SearchProvider {
 	const normalized = stringAt(value, path, key).toLowerCase();
 	switch (normalized) {
@@ -218,8 +261,8 @@ function normalize(raw: JsonObject, path: string): Readonly<WebAccessSettings> {
 			maxSizeMB: video?.maxSizeMB === undefined ? defaults.video.maxSizeMB : positiveNumberAt(video.maxSizeMB, path, "video.maxSizeMB"),
 		},
 		shortcuts: {
-			curate: shortcuts?.curate === undefined ? defaults.shortcuts.curate : stringAt(shortcuts.curate, path, "shortcuts.curate"),
-			activity: shortcuts?.activity === undefined ? defaults.shortcuts.activity : stringAt(shortcuts.activity, path, "shortcuts.activity"),
+			curate: shortcuts?.curate === undefined ? defaults.shortcuts.curate : shortcutAt(shortcuts.curate, path, "shortcuts.curate"),
+			activity: shortcuts?.activity === undefined ? defaults.shortcuts.activity : shortcutAt(shortcuts.activity, path, "shortcuts.activity"),
 		},
 		ssrf: {
 			allowRanges: ssrf?.allowRanges === undefined ? defaults.ssrf.allowRanges : normalizeAllowRanges(ssrf.allowRanges, path),

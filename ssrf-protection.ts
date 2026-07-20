@@ -136,6 +136,7 @@ function isBlockedIPv4(address: string): boolean {
 	const parts = address.split(".").map(part => Number(part));
 	if (parts.length !== 4 || parts.some(part => !Number.isInteger(part) || part < 0 || part > 255)) return true;
 	const [a, b] = parts;
+	if (a === undefined || b === undefined) return true;
 	return a === 0 ||
 		a === 10 ||
 		a === 127 ||
@@ -152,14 +153,18 @@ function isBlockedIPv6(address: string): boolean {
 	if (!groups) return true;
 
 	const first = groups[0];
+	const sixth = groups[5];
+	const seventh = groups[6];
+	const eighth = groups[7];
+	if (first === undefined || sixth === undefined || seventh === undefined || eighth === undefined) return true;
 	if (groups.every(group => group === 0)) return true;
-	if (groups.slice(0, 7).every(group => group === 0) && groups[7] === 1) return true;
+	if (groups.slice(0, 7).every(group => group === 0) && eighth === 1) return true;
 	if ((first & 0xfe00) === 0xfc00) return true;
 	if ((first & 0xffc0) === 0xfe80) return true;
 
-	const isMappedIPv4 = groups.slice(0, 5).every(group => group === 0) && groups[5] === 0xffff;
+	const isMappedIPv4 = groups.slice(0, 5).every(group => group === 0) && sixth === 0xffff;
 	if (isMappedIPv4) {
-		const ipv4 = [groups[6] >> 8, groups[6] & 0xff, groups[7] >> 8, groups[7] & 0xff].join(".");
+		const ipv4 = [seventh >> 8, seventh & 0xff, eighth >> 8, eighth & 0xff].join(".");
 		return isBlockedIPv4(ipv4);
 	}
 
@@ -172,7 +177,8 @@ function parseIPv6(address: string): number[] | null {
 		const ipv4 = address.slice(lastColon + 1);
 		if (net.isIP(ipv4) !== 4) return null;
 		const octets = ipv4.split(".").map(part => Number(part));
-		address = `${address.slice(0, lastColon)}:${((octets[0] << 8) | octets[1]).toString(16)}:${((octets[2] << 8) | octets[3]).toString(16)}`;
+		const [first = 0, second = 0, third = 0, fourth = 0] = octets;
+		address = `${address.slice(0, lastColon)}:${((first << 8) | second).toString(16)}:${((third << 8) | fourth).toString(16)}`;
 	}
 
 	const pieces = address.split("::");
@@ -258,9 +264,9 @@ function ipv4ToBytes(address: string): Uint8Array | null {
 
 function ipv6GroupsToBytes(groups: number[]): Uint8Array {
 	const bytes = new Uint8Array(16);
-	for (let i = 0; i < 8; i++) {
-		bytes[i * 2] = groups[i] >> 8;
-		bytes[i * 2 + 1] = groups[i] & 0xff;
+	for (const [index, group] of groups.slice(0, 8).entries()) {
+		bytes[index * 2] = group >> 8;
+		bytes[index * 2 + 1] = group & 0xff;
 	}
 	return bytes;
 }
@@ -295,8 +301,11 @@ function bytesMatchPrefix(addr: Uint8Array, network: Uint8Array, prefix: number)
 		if (addr[i] !== network[i]) return false;
 	}
 	if (remBits > 0 && fullBytes < addr.length) {
+		const addressByte = addr[fullBytes];
+		const networkByte = network[fullBytes];
+		if (addressByte === undefined || networkByte === undefined) return false;
 		const mask = (0xff << (8 - remBits)) & 0xff;
-		if ((addr[fullBytes] & mask) !== (network[fullBytes] & mask)) return false;
+		if ((addressByte & mask) !== (networkByte & mask)) return false;
 	}
 	return true;
 }

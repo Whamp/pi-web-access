@@ -253,6 +253,12 @@ export function createStoredResultStore() {
 			};
 		}
 
+		if (urlData === undefined) {
+			return {
+				content: [{ type: "text", text: `Stored content is missing for resultId "${resultId}".` }],
+				details: { error: "Missing stored URL", resultId, urls },
+			};
+		}
 		if (urlData.error) {
 			return {
 				content: [{ type: "text", text: `Stored content failed for resultId "${resultId}" at ${urlData.url}: ${urlData.error}` }],
@@ -307,6 +313,12 @@ export function createStoredResultStore() {
 			};
 		}
 
+		if (queryData === undefined) {
+			return {
+				content: [{ type: "text", text: `Stored search is missing for resultId "${resultId}".` }],
+				details: { error: "Missing stored query", resultId, queries },
+			};
+		}
 		if (queryData.error) {
 			return {
 				content: [{ type: "text", text: `Stored search failed for resultId "${resultId}" at query "${queryData.query}": ${queryData.error}` }],

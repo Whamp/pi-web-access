@@ -52,8 +52,9 @@ export async function extractWithUrlContext(
 		activityMonitor.logComplete(activityId, res.status);
 
 		const metadata = data.candidates?.[0]?.url_context_metadata;
-		if (metadata?.url_metadata?.length) {
-			const status = metadata.url_metadata[0].url_retrieval_status;
+		const firstUrlMetadata = metadata?.url_metadata?.[0];
+		if (firstUrlMetadata) {
+			const status = firstUrlMetadata.url_retrieval_status;
 			if (status === "URL_RETRIEVAL_STATUS_UNSAFE" || status === "URL_RETRIEVAL_STATUS_ERROR") {
 				return null;
 			}

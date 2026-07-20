@@ -1,7 +1,6 @@
 import type { Api, Model, ModelThinkingLevel } from "@earendil-works/pi-ai/compat";
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { activityMonitor } from "./activity.ts";
-import type { SearchOptions, SearchProviderAdapter, SearchResponse, SearchResult } from "./search-provider.ts";
+import type { SearchExtensionContext, SearchOptions, SearchProviderAdapter, SearchResponse, SearchResult } from "./search-provider.ts";
 import { DEFAULT_WEB_ACCESS_SETTINGS, getWebAccessConfiguration, type WebAccessSettings } from "./configuration.ts";
 
 const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
@@ -187,7 +186,7 @@ function selectCatalogModel(
 }
 
 async function resolveRegistryAuth(
-	ctx: ExtensionContext,
+	ctx: SearchExtensionContext,
 	model: Model<Api>,
 	provider: "openai-codex" | "openai",
 	selector: string,
@@ -195,7 +194,7 @@ async function resolveRegistryAuth(
 	signal?: AbortSignal,
 ): Promise<OpenAIAuth | undefined> {
 	const reasoningEffort = resolveReasoningEffort(selector, model, level);
-	let resolved: Awaited<ReturnType<ExtensionContext["modelRegistry"]["getApiKeyAndHeaders"]>>;
+	let resolved: Awaited<ReturnType<SearchExtensionContext["modelRegistry"]["getApiKeyAndHeaders"]>>;
 	try {
 		resolved = await ctx.modelRegistry.getApiKeyAndHeaders(model);
 	} catch {
@@ -217,7 +216,7 @@ async function resolveRegistryAuth(
 
 /** Resolves the configured OpenAI search model and the preferred usable OpenAI credentials. */
 export async function resolveOpenAIAuth(
-	ctx?: ExtensionContext,
+	ctx?: SearchExtensionContext,
 	signal?: AbortSignal,
 	settings: OpenAISearchSettings = {},
 ): Promise<OpenAIAuth | undefined> {
@@ -245,12 +244,15 @@ export async function resolveOpenAIAuth(
 		}
 	}
 
-	const { getModel, getModels } = await import("@earendil-works/pi-ai/compat");
+	const { getModels } = await import("@earendil-works/pi-ai/compat");
+	const codexCatalog = getModels("openai-codex");
+	const directCatalog = getModels("openai");
 	const apiKey = normalizeApiKey(process.env.OPENAI_API_KEY) ?? normalizeApiKey(settings.openaiApiKey);
 	if (!apiKey) {
-		const catalogModel = getModel("openai-codex", parsed.modelId) ?? getModel("openai", parsed.modelId);
+		const catalogModel = codexCatalog.find((model) => model.id === parsed.modelId)
+			?? directCatalog.find((model) => model.id === parsed.modelId);
 		if (!catalogModel) {
-			const available = [...getModels("openai-codex"), ...getModels("openai")]
+			const available = [...codexCatalog, ...directCatalog]
 				.map((model) => model.id)
 				.filter((modelId, index, modelIds) => modelIds.indexOf(modelId) === index)
 				.sort();
@@ -262,8 +264,8 @@ export async function resolveOpenAIAuth(
 		resolveReasoningEffort(selector, catalogModel, parsed.reasoningLevel);
 		return undefined;
 	}
-	const directModel = getModel("openai", parsed.modelId);
-	const model = directModel ?? selectCatalogModel(selector, parsed, "openai", getModels("openai"));
+	const directModel = directCatalog.find((model) => model.id === parsed.modelId);
+	const model = directModel ?? selectCatalogModel(selector, parsed, "openai", directCatalog);
 	return {
 		provider: "openai",
 		apiKey,
@@ -275,7 +277,7 @@ export async function resolveOpenAIAuth(
 
 /** Reports whether the configured OpenAI search model and credentials can be resolved. */
 export async function isOpenAISearchAvailable(
-	ctx?: ExtensionContext,
+	ctx?: SearchExtensionContext,
 	signal?: AbortSignal,
 	settings: OpenAISearchSettings = {},
 ): Promise<boolean> {
@@ -463,7 +465,7 @@ function extractAnswer(output: unknown[]): string {
 export async function searchWithOpenAI(
 	query: string,
 	options: SearchOptions = {},
-	ctx?: ExtensionContext,
+	ctx?: SearchExtensionContext,
 	settings: OpenAISearchSettings = {},
 ): Promise<SearchResponse> {
 	const auth = await resolveOpenAIAuth(ctx, options.signal, settings);

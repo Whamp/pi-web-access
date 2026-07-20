@@ -45,12 +45,33 @@ test("missing configuration registers web_search with default shortcuts", async 
 });
 
 test("custom shortcuts are registered from the startup settings", async () => {
-	const { loaded } = await loadRegisteredExtension(JSON.stringify({ shortcuts: { curate: "ctrl+x", activity: "ctrl+y" } }));
+	const { loaded } = await loadRegisteredExtension(JSON.stringify({
+		shortcuts: { curate: "super+alt+shift+ctrl+pageUp", activity: "ctrl++" },
+	}));
 	assert.deepEqual(loaded.errors, []);
 	const extension = loaded.extensions[0];
-	assert.ok(extension.shortcuts.has("ctrl+x"));
-	assert.ok(extension.shortcuts.has("ctrl+y"));
+	assert.ok(extension.shortcuts.has("super+alt+shift+ctrl+pageUp"));
+	assert.ok(extension.shortcuts.has("ctrl++"));
 	assert.equal(extension.shortcuts.has("ctrl+shift+s"), false);
+});
+
+test("mixed-case shortcuts are normalized and registered", async () => {
+	const { loaded } = await loadRegisteredExtension(JSON.stringify({
+		shortcuts: { curate: "Ctrl+Shift+S", activity: "SUPER+ALT+W" },
+	}));
+
+	assert.deepEqual(loaded.errors, []);
+	const extension = loaded.extensions[0];
+	assert.ok(extension.shortcuts.has("ctrl+shift+s"));
+	assert.ok(extension.shortcuts.has("super+alt+w"));
+});
+
+test("invalid shortcut configuration stops extension registration", async () => {
+	const { loaded } = await loadRegisteredExtension(JSON.stringify({ shortcuts: { activity: "ctrl+ctrl+w" } }));
+	assert.equal(loaded.extensions.length, 0);
+	assert.equal(loaded.errors.length, 1);
+	assert.match(loaded.errors[0].error, /shortcuts\.activity must be a valid Pi key identifier/);
+	assert.match(loaded.errors[0].error, /web-search\.json/);
 });
 
 test("invalid configuration stops extension registration", async () => {

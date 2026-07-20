@@ -79,9 +79,12 @@ export function parseGitHubUrl(url: string): GitHubUrlInfo | null {
 	if (segments.length < 2) return null;
 
 	const owner = segments[0];
-	const repo = segments[1].replace(/\.git$/, "");
+	const repoSegment = segments[1];
+	if (owner === undefined || repoSegment === undefined) return null;
+	const repo = repoSegment.replace(/\.git$/, "");
 
-	if (NON_CODE_SEGMENTS.has(segments[2]?.toLowerCase())) return null;
+	const nonCodeSegment = segments[2]?.toLowerCase();
+	if (nonCodeSegment !== undefined && NON_CODE_SEGMENTS.has(nonCodeSegment)) return null;
 
 	if (segments.length === 2) {
 		return { owner, repo, refIsFullSha: false, type: "root" };
@@ -92,6 +95,7 @@ export function parseGitHubUrl(url: string): GitHubUrlInfo | null {
 	if (segments.length < 4) return null;
 
 	const ref = segments[3];
+	if (ref === undefined) return null;
 	const refIsFullSha = /^[0-9a-f]{40}$/.test(ref);
 	const pathParts = segments.slice(4);
 	const path = pathParts.length > 0 ? pathParts.join("/") : "";
@@ -102,7 +106,7 @@ export function parseGitHubUrl(url: string): GitHubUrlInfo | null {
 		ref,
 		refIsFullSha,
 		path,
-		type: action as "blob" | "tree",
+		type: action,
 	};
 }
 
@@ -117,8 +121,10 @@ function cloneDir(config: GitHubCloneConfig, owner: string, repo: string, ref?: 
 
 function execClone(args: string[], localPath: string, timeoutMs: number, signal?: AbortSignal): Promise<string | null> {
 	if (signal?.aborted) return Promise.resolve(null);
+	const [command, ...commandArguments] = args;
+	if (command === undefined) return Promise.resolve(null);
 	return new Promise((resolve) => {
-		const child = execFile(args[0], args.slice(1), { timeout: timeoutMs }, (err) => {
+		const child = execFile(command, commandArguments, { timeout: timeoutMs }, (err) => {
 			if (err) {
 				try {
 					rmSync(localPath, { recursive: true, force: true });

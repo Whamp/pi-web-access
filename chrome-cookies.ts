@@ -240,7 +240,9 @@ async function importSqlite(): Promise<typeof import("node:sqlite") | null> {
 }
 
 function supportsReadBigInts(): boolean {
-	const [major, minor] = process.versions.node.split(".").map(Number);
+	const [majorText = "0", minorText = "0"] = process.versions.node.split(".");
+	const major = Number(majorText);
+	const minor = Number(minorText);
 	if (major > 24) return true;
 	if (major < 24) return false;
 	return minor >= 4;

@@ -43,10 +43,13 @@ export interface SearchOptions {
 	signal?: AbortSignal;
 }
 
+/** Minimal host context required to resolve model credentials for model-backed search providers. */
+export type SearchExtensionContext = Pick<ExtensionContext, "modelRegistry">;
+
 export interface FullSearchOptions extends SearchOptions {
 	provider?: SearchProvider;
 	includeContent?: boolean;
-	extensionContext?: ExtensionContext;
+	extensionContext?: SearchExtensionContext;
 }
 
 export type ProviderEligibility =
@@ -59,7 +62,7 @@ export interface SearchProviderRequest {
 }
 
 export interface SearchProviderEligibilityRequest {
-	extensionContext?: ExtensionContext;
+	extensionContext?: SearchExtensionContext;
 	signal?: AbortSignal;
 }
 
