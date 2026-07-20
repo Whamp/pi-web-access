@@ -53,6 +53,7 @@ export function fetchOwnedResponse(
 	);
 }
 
+/** Reads a response body and cancels it when streamed bytes exceed an optional limit. */
 export async function readResponseBytes(
 	response: Response,
 	signal?: AbortSignal,
@@ -93,7 +94,7 @@ export async function readResponseBytes(
 			size += value.byteLength;
 			if (maxBytes !== undefined && size > maxBytes) {
 				const error = new ResponseBodyTooLargeError(maxBytes, size);
-				await cancel(error);
+				void cancel(error).catch(() => {});
 				throw error;
 			}
 		}
@@ -119,6 +120,11 @@ export async function readResponseBytes(
 	}
 }
 
-export async function readResponseText(response: Response, signal?: AbortSignal): Promise<string> {
-	return new TextDecoder().decode(await readResponseBytes(response, signal));
+/** Reads a text response and enforces the optional streamed-byte limit before decoding. */
+export async function readResponseText(
+	response: Response,
+	signal?: AbortSignal,
+	maxBytes?: number,
+): Promise<string> {
+	return new TextDecoder().decode(await readResponseBytes(response, signal, maxBytes));
 }

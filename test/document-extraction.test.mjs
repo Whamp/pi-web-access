@@ -11,6 +11,7 @@ test("fetch_content converts a DOCX response to readable Markdown", async () => 
 	const bytes = await readFile(new URL("./fixtures/simple.docx", import.meta.url));
 	globalThis.fetch = async () => new Response(bytes, {
 		headers: {
+			"content-length": String(6 * 1024 * 1024),
 			"content-type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 		},
 	});

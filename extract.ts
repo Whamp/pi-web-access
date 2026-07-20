@@ -6,7 +6,7 @@ import { DEFAULT_MEDIA_SETTINGS, DEFAULT_WEB_ACCESS_SETTINGS, getWebAccessConfig
 import { settleWithAbort } from "./abort.ts";
 import { createAbortableLimiter } from "./abortable-limit.ts";
 import { extractRSCContent } from "./rsc-extract.ts";
-import { convertDocument, isConvertibleDocument, isPdfDocument } from "./document-converter.ts";
+import { convertDocument, isConvertibleDocument } from "./document-converter.ts";
 import { extractGitHub } from "./github-extract.ts";
 import { isYouTubeURL, isYouTubeEnabled, extractYouTube, extractYouTubeFrame, extractYouTubeFrames, getYouTubeStreamInfo } from "./youtube-extract.ts";
 import { extractWithUrlContext, extractWithGeminiWeb } from "./gemini-url-context.ts";
@@ -19,6 +19,8 @@ import { discardResponseBody, fetchOwnedResponse, readResponseBytes, readRespons
 
 const DEFAULT_TIMEOUT_MS = 30000;
 const CONCURRENT_LIMIT = 3;
+const MAX_RESPONSE_BYTES = 5 * 1024 * 1024;
+const MAX_DOCUMENT_RESPONSE_BYTES = 20 * 1024 * 1024;
 
 const NON_RECOVERABLE_ERRORS = ["Unsupported content type", "Response too large"];
 const MIN_USEFUL_CONTENT = 500;
@@ -35,6 +37,10 @@ function isAbortError(err: unknown): boolean {
 
 function abortedResult(url: string): ExtractedContent {
 	return { url, title: "", content: "", error: "Aborted" };
+}
+
+function responseTooLargeMessage(maxBytes: number): string {
+	return `Response too large (limit ${Math.round(maxBytes / 1024 / 1024)}MB)`;
 }
 
 const turndown = new TurndownService({
@@ -110,7 +116,7 @@ async function extractWithJinaReader(
 			return null;
 		}
 
-		const content = await readResponseText(res, requestSignal);
+		const content = await readResponseText(res, requestSignal, MAX_RESPONSE_BYTES);
 		activityMonitor.logComplete(activityId, res.status);
 
 		const contentStart = content.indexOf("Markdown Content:");
@@ -545,12 +551,11 @@ async function extractViaHttp(
 
 		const contentLengthHeader = response.headers.get("content-length");
 		const contentType = response.headers.get("content-type") || "";
-		const isPdfContent = isPdfDocument(url, contentType);
 		const isDocumentContent = isConvertibleDocument(url, contentType);
-		const maxResponseSize = isPdfContent ? 20 * 1024 * 1024 : 5 * 1024 * 1024;
+		const maxResponseBytes = isDocumentContent ? MAX_DOCUMENT_RESPONSE_BYTES : MAX_RESPONSE_BYTES;
 		if (contentLengthHeader) {
 			const contentLength = parseInt(contentLengthHeader, 10);
-			if (contentLength > maxResponseSize) {
+			if (contentLength > maxResponseBytes) {
 				await discardResponseBody(response, "Response exceeded the content limit", controller.signal);
 				activityMonitor.logComplete(activityId, response.status);
 				return {
@@ -564,13 +569,13 @@ async function extractViaHttp(
 
 		if (isDocumentContent) {
 			try {
-				const bytes = await readResponseBytes(response, controller.signal, maxResponseSize);
+				const bytes = await readResponseBytes(response, controller.signal, maxResponseBytes);
 				const result = await convertDocument(bytes, url, contentType);
 				controller.signal.throwIfAborted();
 				activityMonitor.logComplete(activityId, response.status);
 				return {
 					url,
-					title: result.title ?? extractTextTitle(result.markdown, url),
+					title: result.title || extractTextTitle(result.markdown, url),
 					content: result.markdown,
 					error: null,
 				};
@@ -578,8 +583,7 @@ async function extractViaHttp(
 				if (controller.signal.aborted) throw err;
 				if (err instanceof ResponseBodyTooLargeError) {
 					activityMonitor.logError(activityId, err.message);
-					const limitMegabytes = Math.round(maxResponseSize / 1024 / 1024);
-					return { url, title: "", content: "", error: `Response too large (limit ${limitMegabytes}MB)` };
+					return { url, title: "", content: "", error: responseTooLargeMessage(maxResponseBytes) };
 				}
 				const message = err instanceof Error ? err.message : String(err);
 				activityMonitor.logError(activityId, message);
@@ -602,7 +606,7 @@ async function extractViaHttp(
 			};
 		}
 
-		const text = new TextDecoder().decode(await readResponseBytes(response, controller.signal, maxResponseSize));
+		const text = new TextDecoder().decode(await readResponseBytes(response, controller.signal, maxResponseBytes));
 		const isHTML = contentType.includes("text/html") || contentType.includes("application/xhtml+xml");
 
 		if (!isHTML) {
@@ -656,7 +660,7 @@ async function extractViaHttp(
 	} catch (err) {
 		if (err instanceof ResponseBodyTooLargeError) {
 			activityMonitor.logError(activityId, err.message);
-			return { url, title: "", content: "", error: "Response too large (limit 5MB)" };
+			return { url, title: "", content: "", error: responseTooLargeMessage(MAX_RESPONSE_BYTES) };
 		}
 		const message = err instanceof Error ? err.message : String(err);
 		if (message.toLowerCase().includes("abort")) {
