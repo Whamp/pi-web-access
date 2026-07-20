@@ -4,7 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- Added direct Markdown conversion for PDF, DOCX, PPTX, and XLSX responses through Markit.
+
 ### Changed
+- Enforced response-size limits against streamed bytes, including chunked responses without a trustworthy `Content-Length` header.
+- PDF fetches now return converted Markdown directly instead of writing a file under `~/Downloads/`.
 - **Breaking:** Renamed the public stored-result reference contract. Producers now return `searchResultId` for Web search records and `contentResultId` for fetched source content; `get_search_content` accepts either as `resultId`. A one-item record no longer requires a selector.
 - Established `Whamp/pi-web-access` as an independent hard fork with its own roadmap.
 - Centralized provider eligibility, strict named-provider behavior, and automatic fallback policy in `web-search.ts`.

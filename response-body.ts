@@ -1,4 +1,5 @@
 import { abortReason, settleWithAbort } from "./abort.ts";
+import { ResponseBodyTooLargeError } from "./errors.ts";
 
 const DISPOSAL_GRACE_MS = 100;
 
@@ -52,10 +53,18 @@ export function fetchOwnedResponse(
 	);
 }
 
-export async function readResponseBytes(response: Response, signal?: AbortSignal): Promise<Uint8Array> {
+/** Reads a response body and cancels it when streamed bytes exceed an optional limit. */
+export async function readResponseBytes(
+	response: Response,
+	signal?: AbortSignal,
+	maxBytes?: number,
+): Promise<Uint8Array> {
 	if (!response.body) {
 		const buffer = await response.arrayBuffer();
 		signal?.throwIfAborted();
+		if (maxBytes !== undefined && buffer.byteLength > maxBytes) {
+			throw new ResponseBodyTooLargeError(maxBytes, buffer.byteLength);
+		}
 		return new Uint8Array(buffer);
 	}
 
@@ -83,6 +92,11 @@ export async function readResponseBytes(response: Response, signal?: AbortSignal
 			if (done) break;
 			chunks.push(value);
 			size += value.byteLength;
+			if (maxBytes !== undefined && size > maxBytes) {
+				const error = new ResponseBodyTooLargeError(maxBytes, size);
+				void cancel(error).catch(() => {});
+				throw error;
+			}
 		}
 		signal?.throwIfAborted();
 
@@ -106,6 +120,11 @@ export async function readResponseBytes(response: Response, signal?: AbortSignal
 	}
 }
 
-export async function readResponseText(response: Response, signal?: AbortSignal): Promise<string> {
-	return new TextDecoder().decode(await readResponseBytes(response, signal));
+/** Reads a text response and enforces the optional streamed-byte limit before decoding. */
+export async function readResponseText(
+	response: Response,
+	signal?: AbortSignal,
+	maxBytes?: number,
+): Promise<string> {
+	return new TextDecoder().decode(await readResponseBytes(response, signal, maxBytes));
 }

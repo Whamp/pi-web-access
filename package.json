@@ -2,7 +2,7 @@
   "name": "pi-web-access",
   "version": "0.13.0",
   "private": true,
-  "description": "Web search, URL fetching, GitHub repo cloning, PDF extraction, YouTube video understanding, and local video analysis for Pi coding agent. Supports OpenAI, Brave, Parallel, Tavily, Exa, Perplexity, and Gemini.",
+  "description": "Web search, URL fetching, document conversion, GitHub repo cloning, YouTube video understanding, and local video analysis for Pi coding agent. Supports OpenAI, Brave, Parallel, Tavily, Exa, Perplexity, and Gemini.",
   "type": "module",
   "scripts": {
     "test": "npm run typecheck && node --test",
@@ -34,8 +34,8 @@
   "dependencies": {
     "@mozilla/readability": "^0.6.0",
     "linkedom": "^0.18.13",
-    "turndown": "^7.2.0",
-    "unpdf": "^1.6.2"
+    "markit-ai": "0.5.3",
+    "turndown": "^7.2.0"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",

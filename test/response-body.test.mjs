@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { discardResponseBody } from "../response-body.ts";
+import { ResponseBodyTooLargeError } from "../errors.ts";
+import { discardResponseBody, readResponseBytes, readResponseText } from "../response-body.ts";
 
 function deferred() {
 	let resolve;
@@ -68,4 +69,50 @@ test("normal body disposal remains bounded when cleanup never settles", async ()
 		discardResponseBody(response),
 		new Promise((_, reject) => setTimeout(() => reject(new Error("body disposal did not settle")), 250)),
 	]);
+});
+
+test("response reading settles when oversized-stream cancellation never does", async () => {
+	const response = new Response(new ReadableStream({
+		start(controller) {
+			controller.enqueue(new Uint8Array([1, 2, 3]));
+		},
+		cancel() {
+			return new Promise(() => {});
+		},
+	}));
+
+	await Promise.race([
+		assert.rejects(
+			readResponseBytes(response, undefined, 2),
+			(error) => error instanceof ResponseBodyTooLargeError,
+		),
+		new Promise((_, reject) => setTimeout(() => reject(new Error("oversized response did not settle")), 250)),
+	]);
+});
+
+test("text response reading enforces the streamed-byte limit before decoding", async () => {
+	const response = new Response("oversized text");
+	await assert.rejects(
+		readResponseText(response, undefined, 4),
+		(error) => error instanceof ResponseBodyTooLargeError,
+	);
+});
+
+test("response reading cancels a stream when actual bytes exceed the limit", async () => {
+	let cancelled = false;
+	const response = new Response(new ReadableStream({
+		start(controller) {
+			controller.enqueue(new Uint8Array([1, 2, 3]));
+			controller.enqueue(new Uint8Array([4, 5, 6]));
+		},
+		cancel() {
+			cancelled = true;
+		},
+	}));
+
+	await assert.rejects(
+		readResponseBytes(response, undefined, 5),
+		(error) => error instanceof ResponseBodyTooLargeError && error.limitBytes === 5,
+	);
+	assert.equal(cancelled, true);
 });
