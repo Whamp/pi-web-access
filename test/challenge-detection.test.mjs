@@ -1,36 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { spawnSync } from "node:child_process";
+import { readFile } from "node:fs/promises";
 import { test } from "node:test";
+import { createHome, lookupSource, runChild } from "../test-utils/challenge-harness.mjs";
 
 const extractModuleUrl = new URL("../extract.ts", import.meta.url).href;
-const lookupSource = `async () => [{ address: "93.184.216.34", family: 4 }]`;
-
-async function createHome(config = {}) {
-	const home = await mkdtemp(join(tmpdir(), "pi-web-access-challenge-"));
-	await mkdir(join(home, ".pi"), { recursive: true });
-	await writeFile(join(home, ".pi", "web-search.json"), JSON.stringify(config));
-	return home;
-}
-
-function runChild(script, home, env = {}) {
-	return spawnSync(process.execPath, ["--experimental-strip-types", "--input-type=module", "--eval", script], {
-		cwd: new URL("..", import.meta.url),
-		encoding: "utf8",
-		env: {
-			...process.env,
-			HOME: home,
-			USERPROFILE: home,
-			GEMINI_API_KEY: "",
-			GOOGLE_GEMINI_BASE_URL: "",
-			CLOUDFLARE_API_KEY: "",
-			PARALLEL_API_KEY: "",
-			...env,
-		},
-	});
-}
 
 test("fetch_content continues to Jina after the ScrapingCourse Cloudflare challenge", async () => {
 	const challenge = await readFile(new URL("./fixtures/scrapingcourse-cloudflare-challenge.html", import.meta.url), "utf8");
@@ -277,6 +250,73 @@ test("fetch_content continues to Gemini after Parallel returns challenge page co
 	assert.ok(output.calls.some(url => url.includes("generativelanguage.googleapis.com")));
 	assert.equal(output.result.error, null);
 	assert.equal(output.result.title, "Recovered by Gemini");
+});
+
+test("fetch_content assesses extracted RSC content before accepting it", async () => {
+	const home = await createHome();
+	const child = runChild(`
+		const calls = [];
+		const rscPayload = "1:" + JSON.stringify(["$", "main", null, { children: [
+			["$", "h1", null, { children: "One more step" }],
+			["$", "p", null, { children: "Performing security verification. Verify that you are not a bot. Complete the security check. " + "Security verification pending. ".repeat(25) }],
+		] }]);
+		const rscHtml = "<html><head><title>Ordinary shell</title></head><body><script>self.__next_f.push([1," + JSON.stringify(rscPayload) + "])</script></body></html>";
+		globalThis.fetch = async (url) => {
+			const urlText = String(url);
+			calls.push(urlText);
+			if (urlText === "https://example.test/rsc-challenge") {
+				return new Response(rscHtml, { headers: { "content-type": "text/html" } });
+			}
+			if (urlText.startsWith("https://r.jina.ai/")) {
+				return new Response("Title: RSC destination\\nMarkdown Content:\\n\\n# RSC destination\\n\\n" + "Usable source content. ".repeat(30), { headers: { "content-type": "text/markdown" } });
+			}
+			throw new Error("Unexpected fetch " + urlText);
+		};
+		const { extractContent } = await import(${JSON.stringify(extractModuleUrl)});
+		const result = await extractContent("https://example.test/rsc-challenge", undefined, { lookup: ${lookupSource} });
+		console.log(JSON.stringify({ calls, result }));
+	`, home);
+
+	assert.equal(child.status, 0, child.stderr);
+	const output = JSON.parse(child.stdout.trim());
+	assert.deepEqual(output.calls, [
+		"https://example.test/rsc-challenge",
+		"https://r.jina.ai/https://example.test/rsc-challenge",
+	]);
+	assert.equal(output.result.error, null);
+	assert.equal(output.result.title, "RSC destination");
+});
+
+test("fetch_content assesses Readability content before accepting it", async () => {
+	const home = await createHome();
+	const child = runChild(`
+		const calls = [];
+		const challengeArticle = "<article><h1>One more step</h1><p>Performing security verification. Verify that you are not a bot. Complete the security check. " + "Security verification pending. ".repeat(25) + "</p></article>";
+		const html = "<html><head><title>Protected source</title></head><body><nav>" + "Ordinary navigation and policy text. ".repeat(80) + "</nav>" + challengeArticle + "</body></html>";
+		globalThis.fetch = async (url) => {
+			const urlText = String(url);
+			calls.push(urlText);
+			if (urlText === "https://example.test/readability-challenge") {
+				return new Response(html, { headers: { "content-type": "text/html" } });
+			}
+			if (urlText.startsWith("https://r.jina.ai/")) {
+				return new Response("Title: Readability destination\\nMarkdown Content:\\n\\n# Readability destination\\n\\n" + "Usable source content. ".repeat(30), { headers: { "content-type": "text/markdown" } });
+			}
+			throw new Error("Unexpected fetch " + urlText);
+		};
+		const { extractContent } = await import(${JSON.stringify(extractModuleUrl)});
+		const result = await extractContent("https://example.test/readability-challenge", undefined, { lookup: ${lookupSource} });
+		console.log(JSON.stringify({ calls, result }));
+	`, home);
+
+	assert.equal(child.status, 0, child.stderr);
+	const output = JSON.parse(child.stdout.trim());
+	assert.deepEqual(output.calls, [
+		"https://example.test/readability-challenge",
+		"https://r.jina.ai/https://example.test/readability-challenge",
+	]);
+	assert.equal(output.result.error, null);
+	assert.equal(output.result.title, "Readability destination");
 });
 
 for (const acceptedCase of [

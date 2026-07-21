@@ -65,16 +65,22 @@ function htmlText(html: string): string {
 
 function isInstructionDominatedChallenge(text: string): boolean {
 	const normalized = text.replace(/\s+/g, " ").trim();
-	if (normalized.length === 0 || normalized.length > 2_000) return false;
+	if (normalized.length === 0 || normalized.length > 2_000) {
+		return false;
+	}
 	const instructionCount = CHALLENGE_INSTRUCTION_PATTERNS.filter(pattern => pattern.test(normalized)).length;
 	const contextCount = CHALLENGE_CONTEXT_PATTERNS.filter(pattern => pattern.test(normalized)).length;
 	return instructionCount >= 2 && contextCount >= 1;
 }
 
 function isChallengeCandidate(candidate: SourceCandidate): boolean {
-	if (candidate.headers?.get("cf-mitigated")?.trim().toLowerCase() === "challenge") return true;
+	if (candidate.headers?.get("cf-mitigated")?.trim().toLowerCase() === "challenge") {
+		return true;
+	}
 	if (candidate.html) {
-		if (/<iframe\b[^>]*\bsrc\s*=\s*["'](?:https?:)?\/\/challenges\.cloudflare\.com\//i.test(candidate.html)) return true;
+		if (/<iframe\b[^>]*\bsrc\s*=\s*["'](?:https?:)?\/\/challenges\.cloudflare\.com\//i.test(candidate.html)) {
+			return true;
+		}
 		return isInstructionDominatedChallenge(htmlText(candidate.html));
 	}
 	return candidate.markdown ? isInstructionDominatedChallenge(candidate.markdown) : false;
@@ -191,7 +197,9 @@ async function extractWithJinaReader(
 			markdownPart.startsWith("Please enable JavaScript")) {
 			return null;
 		}
-		if (isChallengeCandidate({ markdown: markdownPart })) return CHALLENGE_DETECTED;
+		if (isChallengeCandidate({ markdown: markdownPart })) {
+			return CHALLENGE_DETECTED;
+		}
 
 		const title = extractHeadingTitle(markdownPart) ?? (new URL(url).pathname.split("/").pop() || url);
 		return { url, title, content: markdownPart, error: null };
@@ -492,7 +500,9 @@ export async function extractContent(
 		};
 	}
 
-	if (signal?.aborted) return abortedResult(url);
+	if (signal?.aborted) {
+		return abortedResult(url);
+	}
 
 	const httpAttempt = await extractViaHttp(url, signal, options);
 	let challengeDetected = httpAttempt === CHALLENGE_DETECTED;
@@ -500,14 +510,26 @@ export async function extractContent(
 		? { url, title: "", content: "", error: "Anti-bot challenge detected" }
 		: httpAttempt;
 
-	if (signal?.aborted) return abortedResult(url);
-	if (!httpResult.error) return httpResult;
-	if (NON_RECOVERABLE_ERRORS.some(prefix => httpResult.error!.startsWith(prefix))) return httpResult;
+	if (signal?.aborted) {
+		return abortedResult(url);
+	}
+	const httpError = httpResult.error;
+	if (!httpError) {
+		return httpResult;
+	}
+	if (NON_RECOVERABLE_ERRORS.some(prefix => httpError.startsWith(prefix))) {
+		return httpResult;
+	}
 
 	const jinaResult = await extractWithJinaReader(url, signal, options?.lookup, options?.settings?.ssrf.allowRanges);
-	if (jinaResult === CHALLENGE_DETECTED) challengeDetected = true;
-	else if (jinaResult) return jinaResult;
-	if (signal?.aborted) return abortedResult(url);
+	if (jinaResult === CHALLENGE_DETECTED) {
+		challengeDetected = true;
+	} else if (jinaResult) {
+		return jinaResult;
+	}
+	if (signal?.aborted) {
+		return abortedResult(url);
+	}
 
 	let parallelError: string | null = null;
 	try {
@@ -515,32 +537,45 @@ export async function extractContent(
 		if (isParallelAvailable(settings)) {
 			const parallelResult = await extractWithParallel(url, signal, options, settings);
 			if (parallelResult) {
-				if (isChallengeCandidate({ markdown: parallelResult.content })) challengeDetected = true;
-				else return parallelResult;
+				if (isChallengeCandidate({ markdown: parallelResult.content })) {
+					challengeDetected = true;
+				} else {
+					return parallelResult;
+				}
 			}
 		}
 	} catch (err) {
-		if (isAbortError(err)) return abortedResult(url);
+		if (isAbortError(err)) {
+			return abortedResult(url);
+		}
 		parallelError = errorMessage(err);
 	}
-	if (signal?.aborted) return abortedResult(url);
+	if (signal?.aborted) {
+		return abortedResult(url);
+	}
 
 	let geminiResult: ExtractedContent | null = null;
 	try {
 		geminiResult = await extractWithUrlContext(url, signal)
 			?? await extractWithGeminiWeb(url, signal);
 	} catch (err) {
-		if (isAbortError(err)) return abortedResult(url);
+		if (isAbortError(err)) {
+			return abortedResult(url);
+		}
 	}
 
-	if (geminiResult) return geminiResult;
-	if (signal?.aborted) return abortedResult(url);
+	if (geminiResult) {
+		return geminiResult;
+	}
+	if (signal?.aborted) {
+		return abortedResult(url);
+	}
 	if (challengeDetected) {
 		return { url, title: "", content: "", error: BLOCKED_CONTENT_ERROR };
 	}
 
 	const guidance = [
-		httpResult.error,
+		httpError,
 		...(parallelError ? [`Parallel fallback failed: ${parallelError}`] : []),
 		"",
 		"Fallback options:",
@@ -560,13 +595,7 @@ function isLikelyJSRendered(html: string): boolean {
 	const bodyHtml = bodyMatch[1];
 	if (bodyHtml === undefined) return false;
 
-	// Strip tags to get text content
-	const textContent = bodyHtml
-		.replace(/<script[\s\S]*?<\/script>/gi, "")
-		.replace(/<style[\s\S]*?<\/style>/gi, "")
-		.replace(/<[^>]+>/g, "")
-		.replace(/\s+/g, " ")
-		.trim();
+	const textContent = htmlText(bodyHtml);
 
 	// Count scripts
 	const scriptCount = (html.match(/<script/gi) || []).length;
@@ -693,7 +722,9 @@ async function extractViaHttp(
 
 		if (!isHTML) {
 			activityMonitor.logComplete(activityId, response.status);
-			if (isChallengeCandidate({ markdown: text })) return CHALLENGE_DETECTED;
+			if (isChallengeCandidate({ markdown: text })) {
+				return CHALLENGE_DETECTED;
+			}
 			const title = extractTextTitle(text, url);
 			return { url, title, content: text, error: null };
 		}
@@ -706,6 +737,9 @@ async function extractViaHttp(
 			const rscResult = extractRSCContent(text);
 			if (rscResult) {
 				activityMonitor.logComplete(activityId, response.status);
+				if (isChallengeCandidate({ markdown: rscResult.content })) {
+					return CHALLENGE_DETECTED;
+				}
 				return { url, title: rscResult.title, content: rscResult.content, error: null };
 			}
 
@@ -728,6 +762,9 @@ async function extractViaHttp(
 		const markdown = turndown.turndown(article.content ?? "");
 		activityMonitor.logComplete(activityId, response.status);
 
+		if (isChallengeCandidate({ markdown })) {
+			return CHALLENGE_DETECTED;
+		}
 		if (markdown.length < MIN_USEFUL_CONTENT) {
 			return {
 				url,
