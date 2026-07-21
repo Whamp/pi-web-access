@@ -96,6 +96,41 @@ test("fetch_content honors cf-mitigated challenge metadata before accepting the 
 	assert.equal(output.result.title, "Resolved source");
 });
 
+test("fetch_content treats non-2xx challenge metadata as blocked after fallbacks", async () => {
+	const home = await createHome();
+	const child = runChild(`
+		const calls = [];
+		globalThis.fetch = async (url) => {
+			const urlText = String(url);
+			calls.push(urlText);
+			if (urlText === "https://example.test/non-2xx-challenge" || urlText.startsWith("https://r.jina.ai/")) {
+				return new Response("challenge", {
+					status: 403,
+					headers: { "content-type": "text/html", "cf-mitigated": "challenge" },
+				});
+			}
+			throw new Error("Unexpected fetch " + urlText);
+		};
+		const { extractContent } = await import(${JSON.stringify(extractModuleUrl)});
+		const result = await extractContent("https://example.test/non-2xx-challenge", undefined, { lookup: ${lookupSource} });
+		console.log(JSON.stringify({ calls, result }));
+	`, home);
+
+	assert.equal(child.status, 0, child.stderr);
+	const output = JSON.parse(child.stdout.trim());
+	assert.deepEqual(
+		{ calls: output.calls, error: output.result.error, content: output.result.content },
+		{
+			calls: [
+				"https://example.test/non-2xx-challenge",
+				"https://r.jina.ai/https://example.test/non-2xx-challenge",
+			],
+			error: "Requested content remained blocked by an anti-bot challenge.",
+			content: "",
+		},
+	);
+});
+
 test("fetch_content rejects the ScrapingCourse generic anti-bot interstitial", async () => {
 	const challenge = await readFile(new URL("./fixtures/scrapingcourse-antibot-challenge.html", import.meta.url), "utf8");
 	const home = await createHome();

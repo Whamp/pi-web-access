@@ -163,16 +163,16 @@ async function extractWithJinaReader(
 			},
 		}, requestSignal);
 
-		if (!res.ok) {
-			await discardResponseBody(res, "Jina request failed", requestSignal);
-			activityMonitor.logComplete(activityId, res.status);
-			return null;
-		}
-
 		if (isChallengeCandidate({ headers: res.headers })) {
 			await discardResponseBody(res, "Anti-bot challenge detected", requestSignal);
 			activityMonitor.logComplete(activityId, res.status);
 			return CHALLENGE_DETECTED;
+		}
+
+		if (!res.ok) {
+			await discardResponseBody(res, "Jina request failed", requestSignal);
+			activityMonitor.logComplete(activityId, res.status);
+			return null;
 		}
 
 		const content = await readResponseText(res, requestSignal, MAX_RESPONSE_BYTES);
@@ -609,6 +609,12 @@ async function extractViaHttp(
 			{ allowRanges: options?.settings?.ssrf.allowRanges ?? DEFAULT_WEB_ACCESS_SETTINGS.ssrf.allowRanges, lookup: options?.lookup, signal: controller.signal },
 		);
 
+		if (isChallengeCandidate({ headers: response.headers })) {
+			await discardResponseBody(response, "Anti-bot challenge detected", controller.signal);
+			activityMonitor.logComplete(activityId, response.status);
+			return CHALLENGE_DETECTED;
+		}
+
 		if (!response.ok) {
 			await discardResponseBody(response, "HTTP request failed", controller.signal);
 			activityMonitor.logComplete(activityId, response.status);
@@ -618,12 +624,6 @@ async function extractViaHttp(
 				content: "",
 				error: `HTTP ${response.status}: ${response.statusText}`,
 			};
-		}
-
-		if (isChallengeCandidate({ headers: response.headers })) {
-			await discardResponseBody(response, "Anti-bot challenge detected", controller.signal);
-			activityMonitor.logComplete(activityId, response.status);
-			return CHALLENGE_DETECTED;
 		}
 
 		const contentLengthHeader = response.headers.get("content-length");
