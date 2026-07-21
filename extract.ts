@@ -24,8 +24,61 @@ const MAX_DOCUMENT_RESPONSE_BYTES = 20 * 1024 * 1024;
 
 const NON_RECOVERABLE_ERRORS = ["Unsupported content type", "Response too large"];
 const MIN_USEFUL_CONTENT = 500;
+const BLOCKED_CONTENT_ERROR = "Requested content remained blocked by an anti-bot challenge.";
+const CHALLENGE_DETECTED = Symbol("challenge-detected");
 
 type ContentRetrievalSettings = Pick<WebAccessSettings, "ssrf" | "githubClone" | "parallelApiKey">;
+type SourceRetrievalResult = ExtractedContent | typeof CHALLENGE_DETECTED;
+
+interface SourceCandidate {
+	headers?: Headers;
+	html?: string;
+	markdown?: string;
+}
+
+const CHALLENGE_INSTRUCTION_PATTERNS = [
+	/\bperforming security verification\b/i,
+	/\bverif(?:y|ies) (?:that )?you (?:are|(?:'|’)re) (?:a human|not a bot)\b/i,
+	/\bcomplete (?:the )?(?:security check|verification|captcha)\b/i,
+	/\bplease wait while (?:we|your browser|the website)\b/i,
+	/\bconfirm (?:that )?you (?:are|(?:'|’)re) human\b/i,
+	/\bselect (?:the )?(?:checkbox|box)\b/i,
+	/\bprove (?:that )?you (?:are|(?:'|’)re) human\b/i,
+];
+const CHALLENGE_CONTEXT_PATTERNS = [
+	/\banti-bot\b/i,
+	/\bcaptcha\b/i,
+	/\bsecurity (?:check|verification)\b/i,
+	/\bverify your browser\b/i,
+	/\bautomated (?:check|request|traffic)\b/i,
+];
+
+function htmlText(html: string): string {
+	return html
+		.replace(/<script\b[\s\S]*?<\/script>/gi, " ")
+		.replace(/<style\b[\s\S]*?<\/style>/gi, " ")
+		.replace(/<[^>]+>/g, " ")
+		.replace(/&(?:nbsp|amp|quot|#39);/gi, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+}
+
+function isInstructionDominatedChallenge(text: string): boolean {
+	const normalized = text.replace(/\s+/g, " ").trim();
+	if (normalized.length === 0 || normalized.length > 2_000) return false;
+	const instructionCount = CHALLENGE_INSTRUCTION_PATTERNS.filter(pattern => pattern.test(normalized)).length;
+	const contextCount = CHALLENGE_CONTEXT_PATTERNS.filter(pattern => pattern.test(normalized)).length;
+	return instructionCount >= 2 && contextCount >= 1;
+}
+
+function isChallengeCandidate(candidate: SourceCandidate): boolean {
+	if (candidate.headers?.get("cf-mitigated")?.trim().toLowerCase() === "challenge") return true;
+	if (candidate.html) {
+		if (/<iframe\b[^>]*\bsrc\s*=\s*["'](?:https?:)?\/\/challenges\.cloudflare\.com\//i.test(candidate.html)) return true;
+		return isInstructionDominatedChallenge(htmlText(candidate.html));
+	}
+	return candidate.markdown ? isInstructionDominatedChallenge(candidate.markdown) : false;
+}
 
 function errorMessage(err: unknown): string {
 	return err instanceof Error ? err.message : String(err);
@@ -92,7 +145,7 @@ async function extractWithJinaReader(
 	signal?: AbortSignal,
 	lookup?: Lookup,
 	allowRanges: readonly string[] = DEFAULT_WEB_ACCESS_SETTINGS.ssrf.allowRanges,
-): Promise<ExtractedContent | null> {
+): Promise<ExtractedContent | null | typeof CHALLENGE_DETECTED> {
 	const jinaUrl = JINA_READER_BASE + url;
 
 	const activityId = activityMonitor.logStart({ type: "api", query: `jina: ${url}` });
@@ -116,6 +169,12 @@ async function extractWithJinaReader(
 			return null;
 		}
 
+		if (isChallengeCandidate({ headers: res.headers })) {
+			await discardResponseBody(res, "Anti-bot challenge detected", requestSignal);
+			activityMonitor.logComplete(activityId, res.status);
+			return CHALLENGE_DETECTED;
+		}
+
 		const content = await readResponseText(res, requestSignal, MAX_RESPONSE_BYTES);
 		activityMonitor.logComplete(activityId, res.status);
 
@@ -132,6 +191,7 @@ async function extractWithJinaReader(
 			markdownPart.startsWith("Please enable JavaScript")) {
 			return null;
 		}
+		if (isChallengeCandidate({ markdown: markdownPart })) return CHALLENGE_DETECTED;
 
 		const title = extractHeadingTitle(markdownPart) ?? (new URL(url).pathname.split("/").pop() || url);
 		return { url, title, content: markdownPart, error: null };
@@ -434,14 +494,19 @@ export async function extractContent(
 
 	if (signal?.aborted) return abortedResult(url);
 
-	const httpResult = await extractViaHttp(url, signal, options);
+	const httpAttempt = await extractViaHttp(url, signal, options);
+	let challengeDetected = httpAttempt === CHALLENGE_DETECTED;
+	const httpResult: ExtractedContent = httpAttempt === CHALLENGE_DETECTED
+		? { url, title: "", content: "", error: "Anti-bot challenge detected" }
+		: httpAttempt;
 
 	if (signal?.aborted) return abortedResult(url);
 	if (!httpResult.error) return httpResult;
 	if (NON_RECOVERABLE_ERRORS.some(prefix => httpResult.error!.startsWith(prefix))) return httpResult;
 
 	const jinaResult = await extractWithJinaReader(url, signal, options?.lookup, options?.settings?.ssrf.allowRanges);
-	if (jinaResult) return jinaResult;
+	if (jinaResult === CHALLENGE_DETECTED) challengeDetected = true;
+	else if (jinaResult) return jinaResult;
 	if (signal?.aborted) return abortedResult(url);
 
 	let parallelError: string | null = null;
@@ -449,7 +514,10 @@ export async function extractContent(
 		const settings = options?.settings ?? {};
 		if (isParallelAvailable(settings)) {
 			const parallelResult = await extractWithParallel(url, signal, options, settings);
-			if (parallelResult) return parallelResult;
+			if (parallelResult) {
+				if (isChallengeCandidate({ markdown: parallelResult.content })) challengeDetected = true;
+				else return parallelResult;
+			}
 		}
 	} catch (err) {
 		if (isAbortError(err)) return abortedResult(url);
@@ -467,6 +535,9 @@ export async function extractContent(
 
 	if (geminiResult) return geminiResult;
 	if (signal?.aborted) return abortedResult(url);
+	if (challengeDetected) {
+		return { url, title: "", content: "", error: BLOCKED_CONTENT_ERROR };
+	}
 
 	const guidance = [
 		httpResult.error,
@@ -508,7 +579,7 @@ async function extractViaHttp(
 	url: string,
 	signal?: AbortSignal,
 	options?: ExtractOptions,
-): Promise<ExtractedContent> {
+): Promise<SourceRetrievalResult> {
 	const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 	const activityId = activityMonitor.logStart({ type: "fetch", url });
 
@@ -547,6 +618,12 @@ async function extractViaHttp(
 				content: "",
 				error: `HTTP ${response.status}: ${response.statusText}`,
 			};
+		}
+
+		if (isChallengeCandidate({ headers: response.headers })) {
+			await discardResponseBody(response, "Anti-bot challenge detected", controller.signal);
+			activityMonitor.logComplete(activityId, response.status);
+			return CHALLENGE_DETECTED;
 		}
 
 		const contentLengthHeader = response.headers.get("content-length");
@@ -609,8 +686,14 @@ async function extractViaHttp(
 		const text = new TextDecoder().decode(await readResponseBytes(response, controller.signal, maxResponseBytes));
 		const isHTML = contentType.includes("text/html") || contentType.includes("application/xhtml+xml");
 
+		if (isHTML && isChallengeCandidate({ html: text })) {
+			activityMonitor.logComplete(activityId, response.status);
+			return CHALLENGE_DETECTED;
+		}
+
 		if (!isHTML) {
 			activityMonitor.logComplete(activityId, response.status);
+			if (isChallengeCandidate({ markdown: text })) return CHALLENGE_DETECTED;
 			const title = extractTextTitle(text, url);
 			return { url, title, content: text, error: null };
 		}
