@@ -15,6 +15,9 @@ All notable changes to this project will be documented in this file.
 - Centralized provider eligibility, strict named-provider behavior, and automatic fallback policy in `web-search.ts`.
 - Switched installation and project metadata to the GitHub repository.
 
+### Fixed
+- Rejected anti-bot challenge pages as fetched content, continued eligible fallbacks, and reported when the requested content remained blocked.
+
 ### Removed
 - Removed npm distribution and installation instructions. The package is private and installed directly from GitHub.
 

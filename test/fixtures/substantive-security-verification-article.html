@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<head><title>How anti-bot verification works</title></head>
+<body>
+<article>
+<h1>How anti-bot verification works</h1>
+<p>Cloudflare, CAPTCHA systems, and other bot-protection services distinguish automated abuse from ordinary visitors. This article explains the tradeoffs, failure modes, and accessibility consequences of security verification without asking the reader to complete a challenge.</p>
+<h2>Why sites deploy checks</h2>
+<p>A security check can reduce credential stuffing, scraping that overloads an origin, and abusive form submissions. Operators often combine rate limits, browser signals, and a verification widget. Cloudflare Turnstile is one example; reCAPTCHA and provider-specific anti-bot challenges are others. Each approach creates operational and privacy costs that should be measured against the actual threat.</p>
+<p>Users may encounter phrases such as “Performing security verification,” “verify that you are not a bot,” or “complete the security check.” Those phrases describe instructions on an interstitial, not the content of this article. A retrieval system should not confuse this substantive explanation with the interstitial it discusses.</p>
+<h2>Accessibility and reliability</h2>
+<p>Challenge loops can prevent assistive technology, privacy tools, and corporate networks from reaching legitimate content. Site owners should offer accessible alternatives, preserve form state, and avoid repeated checks. Monitoring should distinguish challenge completion failures from origin failures so support teams can resolve the correct problem.</p>
+<p>Developers should also test false positives. A classifier that rejects every mention of CAPTCHA or Cloudflare will hide documentation, incident reports, and journalism. Conservative detection therefore needs structural evidence or instruction-dominated content, while a multi-paragraph article with analysis and context remains useful source material.</p>
+<h2>Operational guidance</h2>
+<p>Measure challenge rates, completion rates, latency, and support contacts. Review rules after traffic changes, document exceptions, and provide a path for users who cannot run JavaScript. Security controls work best when they are narrowly targeted and observable rather than silently applied to every request.</p>
+</article>
+</body>
+</html>
