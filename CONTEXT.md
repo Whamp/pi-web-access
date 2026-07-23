@@ -42,3 +42,7 @@ An opaque identifier for one stored Web search or fetched source content record.
 
 **Content result reference**:
 A Stored result reference for a fetched source content record. Producers expose it as `contentResultId`.
+
+**Client-rendered shell**:
+A retrieved page representation whose structural placeholders are present but whose substantive content is populated only during client-side rendering. Recognizing a Client-rendered shell is a high-confidence structural classification, not a judgment that arbitrary fetched content is semantically complete. It is a failed retrieval candidate, not successful source content.
+_Avoid_: Incomplete page

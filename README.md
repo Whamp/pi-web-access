@@ -205,7 +205,7 @@ Repository URLs are cloned into a session cache. Root URLs return a tree and REA
 
 ### Web pages and documents
 
-HTML passes through Readability first. The extension can then parse Next.js RSC data or retry through Jina Reader, Parallel, and Gemini. The SSRF guard blocks private and reserved address ranges unless explicitly configured.
+HTML passes through Readability first. The extension can then parse Next.js RSC data or retry through Jina Reader, Parallel, and Gemini. High-confidence anti-bot challenges and Client-rendered shells are treated as failed retrieval candidates so eligible fallbacks can continue; uncertain page representations remain accepted. The SSRF guard blocks private and reserved address ranges unless explicitly configured.
 
 PDF, DOCX, PPTX, and XLSX responses are converted to Markdown directly. PDF conversion preserves useful structure such as headings, columns, and ruled tables when the source contains it. Scanned documents require a separate OCR tool.
 

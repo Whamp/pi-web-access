@@ -25,10 +25,16 @@ const MAX_DOCUMENT_RESPONSE_BYTES = 20 * 1024 * 1024;
 const NON_RECOVERABLE_ERRORS = ["Unsupported content type", "Response too large"];
 const MIN_USEFUL_CONTENT = 500;
 const BLOCKED_CONTENT_ERROR = "Requested content remained blocked by an anti-bot challenge.";
-const CHALLENGE_DETECTED = Symbol("challenge-detected");
+const CLIENT_RENDERED_SHELL_ERROR = "Requested content remained a Client-rendered shell.";
 
+const SOURCE_REJECTION = {
+	Challenge: "challenge",
+	ClientRenderedShell: "client-rendered-shell",
+} as const;
+
+type SourceRejection = typeof SOURCE_REJECTION[keyof typeof SOURCE_REJECTION];
 type ContentRetrievalSettings = Pick<WebAccessSettings, "ssrf" | "githubClone" | "parallelApiKey">;
-type SourceRetrievalResult = ExtractedContent | typeof CHALLENGE_DETECTED;
+type SourceRetrievalResult = ExtractedContent | SourceRejection;
 
 interface SourceCandidate {
 	headers?: Headers;
@@ -52,6 +58,15 @@ const CHALLENGE_CONTEXT_PATTERNS = [
 	/\bverify your browser\b/i,
 	/\bautomated (?:check|request|traffic)\b/i,
 ];
+const CLIENT_RENDERING_BLOCKER_PATTERNS = [
+	/\benable javascript to (?:see|view|load|display|show|browse|access)\b/i,
+	/\bjavascript (?:is required|must be enabled) to (?:see|view|load|display|show|browse|access)\b/i,
+];
+const MAX_STANDALONE_SHELL_TEXT_LENGTH = 100;
+const MAX_STRUCTURAL_SHELL_TEXT_LENGTH = 500;
+const MIN_REPEATED_PLACEHOLDERS = 4;
+const MIN_STRUCTURAL_EMPTY_TARGETS = 8;
+const MIN_CLIENT_SCRIPT_TAGS = 4;
 
 function htmlText(html: string): string {
 	return html
@@ -84,6 +99,47 @@ function isChallengeCandidate(candidate: SourceCandidate): boolean {
 		return isInstructionDominatedChallenge(htmlText(candidate.html));
 	}
 	return candidate.markdown ? isInstructionDominatedChallenge(candidate.markdown) : false;
+}
+
+function markdownText(markdown: string): string {
+	return markdown
+		.replace(/!\[[^\]]*\]\([^)]*\)/g, " ")
+		.replace(/https?:\/\/\S+/g, " ")
+		.replace(/[\[\]()#*_`>-]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+}
+
+function emptyPlaceholderCount(candidate: SourceCandidate): number {
+	if (candidate.html) {
+		return candidate.html.match(/\b(?:href|src)\s*=\s*["']\s*["']/gi)?.length ?? 0;
+	}
+	const markdown = candidate.markdown ?? "";
+	const imageOnlyLinks = markdown.match(/\[\s*!\[\s*Image \d+\s*\]\([^)]*\)\s*\]\([^)]*\)/gi)?.length ?? 0;
+	const emptyLinks = markdown.match(/\[\s*\]\([^)]*\)/g)?.length ?? 0;
+	return imageOnlyLinks + emptyLinks;
+}
+
+function isClientRenderedShellCandidate(candidate: SourceCandidate): boolean {
+	const sourceText = candidate.html ? htmlText(candidate.html) : markdownText(candidate.markdown ?? "");
+	if (sourceText.length === 0) {
+		return false;
+	}
+
+	const blockerPresent = CLIENT_RENDERING_BLOCKER_PATTERNS.some(pattern => pattern.test(sourceText));
+	const placeholderCount = emptyPlaceholderCount(candidate);
+	if (blockerPresent && (
+		sourceText.length <= MAX_STANDALONE_SHELL_TEXT_LENGTH ||
+		placeholderCount >= MIN_REPEATED_PLACEHOLDERS
+	)) {
+		return true;
+	}
+
+	if (!candidate.html || sourceText.length > MAX_STRUCTURAL_SHELL_TEXT_LENGTH) {
+		return false;
+	}
+	const scriptCount = candidate.html.match(/<script\b/gi)?.length ?? 0;
+	return placeholderCount >= MIN_STRUCTURAL_EMPTY_TARGETS && scriptCount >= MIN_CLIENT_SCRIPT_TAGS;
 }
 
 function errorMessage(err: unknown): string {
@@ -151,7 +207,7 @@ async function extractWithJinaReader(
 	signal?: AbortSignal,
 	lookup?: Lookup,
 	allowRanges: readonly string[] = DEFAULT_WEB_ACCESS_SETTINGS.ssrf.allowRanges,
-): Promise<ExtractedContent | null | typeof CHALLENGE_DETECTED> {
+): Promise<SourceRetrievalResult | null> {
 	const jinaUrl = JINA_READER_BASE + url;
 
 	const activityId = activityMonitor.logStart({ type: "api", query: `jina: ${url}` });
@@ -172,7 +228,7 @@ async function extractWithJinaReader(
 		if (isChallengeCandidate({ headers: res.headers })) {
 			await discardResponseBody(res, "Anti-bot challenge detected", requestSignal);
 			activityMonitor.logComplete(activityId, res.status);
-			return CHALLENGE_DETECTED;
+			return SOURCE_REJECTION.Challenge;
 		}
 
 		if (!res.ok) {
@@ -191,14 +247,18 @@ async function extractWithJinaReader(
 
 		const markdownPart = content.slice(contentStart + 17).trim(); // 17 = "Markdown Content:".length
 
+		if (isChallengeCandidate({ markdown: markdownPart })) {
+			return SOURCE_REJECTION.Challenge;
+		}
+		if (isClientRenderedShellCandidate({ markdown: markdownPart })) {
+			return SOURCE_REJECTION.ClientRenderedShell;
+		}
+
 		// Check for failed JS rendering or minimal content
 		if (markdownPart.length < 100 ||
 			markdownPart.startsWith("Loading...") ||
 			markdownPart.startsWith("Please enable JavaScript")) {
 			return null;
-		}
-		if (isChallengeCandidate({ markdown: markdownPart })) {
-			return CHALLENGE_DETECTED;
 		}
 
 		const title = extractHeadingTitle(markdownPart) ?? (new URL(url).pathname.split("/").pop() || url);
@@ -505,9 +565,18 @@ export async function extractContent(
 	}
 
 	const httpAttempt = await extractViaHttp(url, signal, options);
-	let challengeDetected = httpAttempt === CHALLENGE_DETECTED;
-	const httpResult: ExtractedContent = httpAttempt === CHALLENGE_DETECTED
-		? { url, title: "", content: "", error: "Anti-bot challenge detected" }
+	let challengeDetected = httpAttempt === SOURCE_REJECTION.Challenge;
+	let clientRenderedShellDetected = httpAttempt === SOURCE_REJECTION.ClientRenderedShell;
+	const httpResult: ExtractedContent = httpAttempt === SOURCE_REJECTION.Challenge ||
+		httpAttempt === SOURCE_REJECTION.ClientRenderedShell
+		? {
+			url,
+			title: "",
+			content: "",
+			error: httpAttempt === SOURCE_REJECTION.Challenge
+				? "Anti-bot challenge detected"
+				: "Client-rendered shell detected",
+		}
 		: httpAttempt;
 
 	if (signal?.aborted) {
@@ -522,8 +591,10 @@ export async function extractContent(
 	}
 
 	const jinaResult = await extractWithJinaReader(url, signal, options?.lookup, options?.settings?.ssrf.allowRanges);
-	if (jinaResult === CHALLENGE_DETECTED) {
+	if (jinaResult === SOURCE_REJECTION.Challenge) {
 		challengeDetected = true;
+	} else if (jinaResult === SOURCE_REJECTION.ClientRenderedShell) {
+		clientRenderedShellDetected = true;
 	} else if (jinaResult) {
 		return jinaResult;
 	}
@@ -572,6 +643,9 @@ export async function extractContent(
 	}
 	if (challengeDetected) {
 		return { url, title: "", content: "", error: BLOCKED_CONTENT_ERROR };
+	}
+	if (clientRenderedShellDetected) {
+		return { url, title: "", content: "", error: CLIENT_RENDERED_SHELL_ERROR };
 	}
 
 	const guidance = [
@@ -641,7 +715,7 @@ async function extractViaHttp(
 		if (isChallengeCandidate({ headers: response.headers })) {
 			await discardResponseBody(response, "Anti-bot challenge detected", controller.signal);
 			activityMonitor.logComplete(activityId, response.status);
-			return CHALLENGE_DETECTED;
+			return SOURCE_REJECTION.Challenge;
 		}
 
 		if (!response.ok) {
@@ -717,13 +791,20 @@ async function extractViaHttp(
 
 		if (isHTML && isChallengeCandidate({ html: text })) {
 			activityMonitor.logComplete(activityId, response.status);
-			return CHALLENGE_DETECTED;
+			return SOURCE_REJECTION.Challenge;
+		}
+		if (isHTML && isClientRenderedShellCandidate({ html: text })) {
+			activityMonitor.logComplete(activityId, response.status);
+			return SOURCE_REJECTION.ClientRenderedShell;
 		}
 
 		if (!isHTML) {
 			activityMonitor.logComplete(activityId, response.status);
 			if (isChallengeCandidate({ markdown: text })) {
-				return CHALLENGE_DETECTED;
+				return SOURCE_REJECTION.Challenge;
+			}
+			if (isClientRenderedShellCandidate({ markdown: text })) {
+				return SOURCE_REJECTION.ClientRenderedShell;
 			}
 			const title = extractTextTitle(text, url);
 			return { url, title, content: text, error: null };
@@ -738,7 +819,10 @@ async function extractViaHttp(
 			if (rscResult) {
 				activityMonitor.logComplete(activityId, response.status);
 				if (isChallengeCandidate({ markdown: rscResult.content })) {
-					return CHALLENGE_DETECTED;
+					return SOURCE_REJECTION.Challenge;
+				}
+				if (isClientRenderedShellCandidate({ markdown: rscResult.content })) {
+					return SOURCE_REJECTION.ClientRenderedShell;
 				}
 				return { url, title: rscResult.title, content: rscResult.content, error: null };
 			}
@@ -763,7 +847,10 @@ async function extractViaHttp(
 		activityMonitor.logComplete(activityId, response.status);
 
 		if (isChallengeCandidate({ markdown })) {
-			return CHALLENGE_DETECTED;
+			return SOURCE_REJECTION.Challenge;
+		}
+		if (isClientRenderedShellCandidate({ markdown })) {
+			return SOURCE_REJECTION.ClientRenderedShell;
 		}
 		if (markdown.length < MIN_USEFUL_CONTENT) {
 			return {
@@ -772,7 +859,7 @@ async function extractViaHttp(
 				content: markdown,
 				error: isLikelyJSRendered(text)
 					? "Page appears to be JavaScript-rendered (content loads dynamically)"
-					: "Extracted content appears incomplete",
+					: "Extracted content is too sparse to accept",
 			};
 		}
 
