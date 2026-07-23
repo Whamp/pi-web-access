@@ -10,6 +10,12 @@ A request for an answer and sources from the web. One search provider executes e
 **Agent Web search**:
 A Web search performed for an agent turn. It has one terminal completion point and never opens the Search Curator.
 
+**Multi-provider Web search**:
+An opt-in mode of Agent Web search enabled through persistent Web Access configuration. The calling agent cannot select a different Search provider for an individual search.
+
+**Multi-provider set**:
+The unordered set of named Search providers configured for Multi-provider Web search. Only its members are attempted.
+
 **Search Curator**:
 A user-initiated browser workflow for selecting Web search results and approving a summary. It is not part of Agent Web search.
 
