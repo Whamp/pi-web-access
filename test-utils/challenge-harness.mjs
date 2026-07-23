@@ -20,6 +20,8 @@ export function runChild(script, home, env = {}) {
 			...process.env,
 			HOME: home,
 			USERPROFILE: home,
+			PI_CODING_AGENT_DIR: join(home, ".pi"),
+			XDG_CONFIG_HOME: "",
 			GEMINI_API_KEY: "",
 			GOOGLE_GEMINI_BASE_URL: "",
 			CLOUDFLARE_API_KEY: "",

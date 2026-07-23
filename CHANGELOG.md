@@ -17,6 +17,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 - Rejected anti-bot challenge pages as fetched content, continued eligible fallbacks, and reported when the requested content remained blocked.
+- Rejected high-confidence Client-rendered shells from native and Jina extraction, continued eligible fallbacks, and reported when retrieval remained a shell.
 
 ### Removed
 - Removed npm distribution and installation instructions. The package is private and installed directly from GitHub.
