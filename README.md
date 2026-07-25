@@ -193,7 +193,7 @@ web_search(query, provider: named)
 fetch_content(input)
   → local video: Gemini Files API → Gemini Web
   → GitHub URL: clone → GitHub API fallback
-  → YouTube: Gemini Web → Gemini API → Perplexity
+  → YouTube: (Gemini Web → Gemini API) + public yt-dlp metadata/transcript → Perplexity if neither succeeds
   → HTTP: PDF/DOCX/PPTX/XLSX conversion
         or Readability → RSC parser → Jina Reader → Gemini fallback
   → text, JSON, or Markdown: return directly
@@ -211,7 +211,7 @@ PDF, DOCX, PPTX, and XLSX responses are converted to Markdown directly. PDF conv
 
 ### YouTube and local video
 
-Pass a `prompt` for focused analysis. Frame extraction accepts `H:MM:SS`, `MM:SS`, bare seconds, or a range. Local video analysis supports common formats up to the configured size limit.
+Pass a `prompt` for focused analysis. `fetch_content` supplements Gemini's video analysis with public YouTube metadata and English captions from `yt-dlp`; if either source is unavailable, it returns the available content with an explicit limitation note. Perplexity is used only when neither Gemini nor public transcript retrieval succeeds. Frame extraction accepts `H:MM:SS`, `MM:SS`, bare seconds, or a range. Local video analysis supports common formats up to the configured size limit.
 
 Install optional system tools for frame extraction:
 
@@ -220,7 +220,7 @@ brew install ffmpeg
 brew install yt-dlp
 ```
 
-Use the equivalent packages on Linux or Windows. `ffmpeg` extracts frames and thumbnails; YouTube frame extraction also requires `yt-dlp`.
+Use the equivalent packages on Linux or Windows. `yt-dlp` provides the public YouTube transcript fallback and stream access for frame extraction; `ffmpeg` extracts frames and thumbnails.
 
 ## Search curator
 

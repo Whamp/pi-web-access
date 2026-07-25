@@ -16,6 +16,8 @@ All notable changes to this project will be documented in this file.
 - Switched installation and project metadata to the GitHub repository.
 
 ### Fixed
+- Allowed Gemini Web's signed-in app bootstrap response headers up to 64 KiB without requiring `NODE_OPTIONS`, preserving browser-cookie video understanding as the primary YouTube path.
+- Supplemented Gemini YouTube analysis with public metadata and complete English captions from `yt-dlp`, with explicit limitation notes when either source is unavailable.
 - Rejected anti-bot challenge pages as fetched content, continued eligible fallbacks, and reported when the requested content remained blocked.
 - Rejected high-confidence Client-rendered shells from native and Jina extraction, continued eligible fallbacks, and reported when retrieval remained a shell.
 

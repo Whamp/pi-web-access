@@ -863,7 +863,9 @@ test("registered web_search cancels a non-settling YouTube thumbnail", async () 
 	const thumbnailStarted = deferred();
 	const thumbnailGate = deferred();
 	const originalGeminiKey = process.env.GEMINI_API_KEY;
+	const originalPath = process.env.PATH;
 	process.env.GEMINI_API_KEY = "youtube-terminal-test-key";
+	process.env.PATH = "";
 	globalThis.fetch = async (url) => {
 		const requestUrl = String(url);
 		if (requestUrl.startsWith("https://api.search.brave.com/res/v1/web/search")) {
@@ -898,6 +900,8 @@ test("registered web_search cancels a non-settling YouTube thumbnail", async () 
 		await settlesWithin(execution.catch(() => {}), "registered YouTube thumbnail cleanup");
 		if (originalGeminiKey === undefined) delete process.env.GEMINI_API_KEY;
 		else process.env.GEMINI_API_KEY = originalGeminiKey;
+		if (originalPath === undefined) delete process.env.PATH;
+		else process.env.PATH = originalPath;
 	}
 });
 

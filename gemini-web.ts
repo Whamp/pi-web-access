@@ -26,6 +26,7 @@ const MODEL_HEADERS: Record<string, string> = {
 };
 
 const REQUIRED_COOKIES = ["__Secure-1PSID", "__Secure-1PSIDTS"];
+const GEMINI_APP_MAX_RESPONSE_HEADER_SIZE = 64 * 1024;
 
 export interface GeminiWebOptions {
 	youtubeUrl?: string;
@@ -59,6 +60,7 @@ export async function getActiveGoogleEmail(cookies: CookieMap): Promise<string |
 			cookieHeader,
 			10,
 			AbortSignal.timeout(10000),
+			GEMINI_APP_MAX_RESPONSE_HEADER_SIZE,
 		);
 		const email = extractEmailFromGeminiHtml(html);
 		if (email) return email;
@@ -178,7 +180,13 @@ async function fetchAccessToken(
 	cookieHeader: string,
 	signal: AbortSignal,
 ): Promise<string> {
-	const html = await fetchWithCookieRedirects(GEMINI_APP_URL, cookieHeader, 10, signal);
+	const html = await fetchWithCookieRedirects(
+		GEMINI_APP_URL,
+		cookieHeader,
+		10,
+		signal,
+		GEMINI_APP_MAX_RESPONSE_HEADER_SIZE,
+	);
 
 	for (const key of ["SNlM0e", "thykhd"]) {
 		const match = html.match(new RegExp(`"${key}":"(.*?)"`));
@@ -193,13 +201,14 @@ async function fetchWithCookieRedirects(
 	cookieHeader: string,
 	maxRedirects: number,
 	signal: AbortSignal,
+	maxResponseHeaderSize?: number,
 ): Promise<string> {
 	let current = url;
 	for (let i = 0; i <= maxRedirects; i++) {
 		const res = await fetchOwnedResponse(current, {
 			headers: { "user-agent": USER_AGENT, cookie: cookieHeader },
 			redirect: "manual",
-		}, signal);
+		}, signal, { maxResponseHeaderSize });
 		if (res.status >= 300 && res.status < 400) {
 			const location = res.headers.get("location");
 			if (location) {

@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
+import { createServer } from "node:http";
 import { test } from "node:test";
 
 import { ResponseBodyTooLargeError } from "../errors.ts";
-import { discardResponseBody, readResponseBytes, readResponseText } from "../response-body.ts";
+import { discardResponseBody, fetchOwnedResponse, readResponseBytes, readResponseText } from "../response-body.ts";
 
 function deferred() {
 	let resolve;
@@ -11,6 +12,43 @@ function deferred() {
 	});
 	return { promise, resolve };
 }
+
+test("owned fetch retries response-header overflow with an explicit larger limit", async (context) => {
+	const oversizedHeader = "x".repeat(20 * 1024);
+	const server = createServer((_request, response) => {
+		response.writeHead(200, { "x-oversized-test-header": oversizedHeader });
+		response.end("large headers accepted");
+	});
+	await new Promise((resolve, reject) => {
+		server.once("error", reject);
+		server.listen(0, "127.0.0.1", resolve);
+	});
+	context.after(() => new Promise((resolve, reject) => {
+		server.close(error => error ? reject(error) : resolve());
+	}));
+
+	const address = server.address();
+	assert.notEqual(address, null);
+	assert.equal(typeof address, "object");
+	const originalFetch = globalThis.fetch;
+	const overflowCause = new Error("Headers Overflow Error");
+	overflowCause.code = "UND_ERR_HEADERS_OVERFLOW";
+	globalThis.fetch = async () => {
+		throw new TypeError("fetch failed", { cause: overflowCause });
+	};
+	try {
+		const signal = AbortSignal.timeout(5_000);
+		const response = await fetchOwnedResponse(
+			`http://127.0.0.1:${address.port}`,
+			{ redirect: "manual" },
+			signal,
+			{ maxResponseHeaderSize: 64 * 1024 },
+		);
+		assert.equal(await readResponseText(response, signal), "large headers accepted");
+	} finally {
+		globalThis.fetch = originalFetch;
+	}
+});
 
 test("normal body disposal waits for asynchronous cleanup", async () => {
 	const cleanup = deferred();

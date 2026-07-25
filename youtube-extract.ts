@@ -1,4 +1,5 @@
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
+import { promisify } from "node:util";
 import { DEFAULT_MEDIA_SETTINGS, type MediaSettings } from "./configuration.ts";
 import { activityMonitor } from "./activity.ts";
 import { settleWithAbort } from "./abort.ts";
@@ -6,7 +7,13 @@ import { isGeminiWebAvailable, queryWithCookies } from "./gemini-web.ts";
 import { isGeminiApiAvailable, queryGeminiApiWithVideo } from "./gemini-api.ts";
 import { isPerplexityAvailable, searchWithPerplexity } from "./perplexity.ts";
 import { extractHeadingTitle, type ExtractedContent, type FrameResult, type VideoFrame } from "./extract.ts";
-import { abandonResponseBody, discardResponseBody, readResponseBytes } from "./response-body.ts";
+import {
+	abandonResponseBody,
+	discardResponseBody,
+	fetchOwnedResponse,
+	readResponseBytes,
+	readResponseText,
+} from "./response-body.ts";
 import { formatSeconds, readExecError, isTimeoutError, trimErrorText, mapFfmpegError } from "./utils.ts";
 
 const YOUTUBE_PROMPT = `Extract the complete content of this YouTube video. Include:
@@ -19,6 +26,23 @@ Format as markdown.`;
 
 const YOUTUBE_REGEX =
 	/(?:(?:www\.|m\.)?youtube\.com\/(?:watch\?.*v=|shorts\/|live\/|embed\/|v\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})/;
+const execFileAsync = promisify(execFile);
+const YT_DLP_TRANSCRIPT_TIMEOUT_MS = 30_000;
+const YOUTUBE_CAPTION_TIMEOUT_MS = 15_000;
+const MAX_YOUTUBE_CAPTION_BYTES = 5 * 1024 * 1024;
+
+interface YouTubeCaptionTrack {
+	url: string;
+	headers: Headers;
+}
+
+interface YouTubeTranscriptMetadata {
+	title: string;
+	channel: string;
+	publicationDate: string;
+	durationSeconds: number | null;
+	caption: YouTubeCaptionTrack | null;
+}
 
 function errorMessage(err: unknown): string {
 	return err instanceof Error ? err.message : String(err);
@@ -68,8 +92,10 @@ export async function extractYouTube(
 	const activityId = activityMonitor.logStart({ type: "fetch", url: `youtube.com/${videoId ?? "video"}` });
 	const attemptErrors: string[] = [];
 
-	const result = await tryGeminiWeb(canonicalUrl, effectivePrompt, effectiveModel, signal, attemptErrors)
-		?? await tryGeminiApi(canonicalUrl, effectivePrompt, effectiveModel, signal, attemptErrors)
+	const geminiResult = await tryGeminiWeb(canonicalUrl, effectivePrompt, effectiveModel, signal, attemptErrors)
+		?? await tryGeminiApi(canonicalUrl, effectivePrompt, effectiveModel, signal, attemptErrors);
+	const publicTranscriptResult = await tryYtDlpTranscript(canonicalUrl, signal, attemptErrors);
+	const result = combineYouTubeSourceResults(geminiResult, publicTranscriptResult)
 		?? await tryPerplexity(url, effectivePrompt, signal, attemptErrors);
 
 	if (result) {
@@ -96,6 +122,216 @@ export async function extractYouTube(
 		: "Could not extract YouTube video content. Sign into Google in Chrome for automatic access, or set GEMINI_API_KEY.";
 	activityMonitor.logError(activityId, error);
 	return { url, title: "", content: "", error };
+}
+
+function combineYouTubeSourceResults(
+	geminiResult: ExtractedContent | null,
+	publicTranscriptResult: ExtractedContent | null,
+): ExtractedContent | null {
+	if (geminiResult && publicTranscriptResult) {
+		return {
+			...geminiResult,
+			title: publicTranscriptResult.title,
+			duration: publicTranscriptResult.duration,
+			content: [
+				"# YouTube Video Analysis and Public Transcript",
+				"",
+				"## Gemini Video Analysis",
+				"",
+				geminiResult.content.trim(),
+				"",
+				"---",
+				"",
+				publicTranscriptResult.content.trim(),
+			].join("\n"),
+		};
+	}
+	if (geminiResult) {
+		return {
+			...geminiResult,
+			content: [
+				geminiResult.content.trim(),
+				"",
+				"---",
+				"",
+				"## Public Transcript Unavailable",
+				"",
+				"Public metadata and captions were unavailable, so the Gemini analysis above may not contain a complete transcript.",
+			].join("\n"),
+		};
+	}
+	if (publicTranscriptResult) {
+		return {
+			...publicTranscriptResult,
+			content: [
+				publicTranscriptResult.content.trim(),
+				"",
+				"---",
+				"",
+				"## Gemini Video Analysis Unavailable",
+				"",
+				"Gemini video analysis was unavailable. This result contains public metadata and captions, but may omit visual context.",
+			].join("\n"),
+		};
+	}
+	return null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parseYouTubePublicationDate(value: unknown): string {
+	if (typeof value !== "string" || !/^\d{8}$/.test(value)) return "Unknown";
+	return `${value.slice(0, 4)}-${value.slice(4, 6)}-${value.slice(6, 8)}`;
+}
+
+function parseYouTubeCaptionTrack(value: unknown): YouTubeCaptionTrack | null {
+	if (!isRecord(value) || typeof value.url !== "string") return null;
+	const headers = new Headers();
+	if (isRecord(value.http_headers)) {
+		for (const [name, headerValue] of Object.entries(value.http_headers)) {
+			if (typeof headerValue === "string") headers.set(name, headerValue);
+		}
+	}
+	return { url: value.url, headers };
+}
+
+function parseYtDlpTranscriptMetadata(output: string): YouTubeTranscriptMetadata {
+	let value: unknown;
+	try {
+		value = JSON.parse(output);
+	} catch (error) {
+		throw new Error("Failed to parse yt-dlp metadata output", { cause: error });
+	}
+	if (!isRecord(value) || typeof value.title !== "string") {
+		throw new Error("Failed to parse yt-dlp metadata: missing video title");
+	}
+
+	const requestedSubtitles = isRecord(value.requested_subtitles) ? value.requested_subtitles : {};
+	const caption = parseYouTubeCaptionTrack(requestedSubtitles.en)
+		?? Object.values(requestedSubtitles).map(parseYouTubeCaptionTrack).find(track => track !== null)
+		?? null;
+	return {
+		title: value.title,
+		channel: typeof value.channel === "string" ? value.channel : "Unknown",
+		publicationDate: parseYouTubePublicationDate(value.upload_date),
+		durationSeconds: typeof value.duration === "number" && Number.isFinite(value.duration)
+			? value.duration
+			: null,
+		caption,
+	};
+}
+
+function parseYouTubeJson3Transcript(output: string): string[] {
+	let value: unknown;
+	try {
+		value = JSON.parse(output);
+	} catch (error) {
+		throw new Error("Failed to parse YouTube JSON3 captions", { cause: error });
+	}
+	if (!isRecord(value) || !Array.isArray(value.events)) {
+		throw new Error("Failed to parse YouTube JSON3 captions: missing events");
+	}
+
+	const transcript: string[] = [];
+	for (const eventValue of value.events) {
+		if (!isRecord(eventValue) || typeof eventValue.tStartMs !== "number" || !Array.isArray(eventValue.segs)) {
+			continue;
+		}
+		const text = eventValue.segs
+			.map(segment => isRecord(segment) && typeof segment.utf8 === "string" ? segment.utf8 : "")
+			.join("")
+			.replace(/\s+/g, " ")
+			.trim();
+		if (!text) continue;
+		const timestamp = formatSeconds(Math.max(0, Math.floor(eventValue.tStartMs / 1000)));
+		transcript.push(`[${timestamp}] ${text}`);
+	}
+	if (transcript.length === 0) {
+		throw new Error("Failed to parse YouTube JSON3 captions: transcript is empty");
+	}
+	return transcript;
+}
+
+function renderYouTubeTranscript(metadata: YouTubeTranscriptMetadata, transcript: string[]): string {
+	const duration = metadata.durationSeconds === null
+		? "Unknown"
+		: formatSeconds(Math.max(0, Math.floor(metadata.durationSeconds)));
+	return [
+		`# ${metadata.title}`,
+		"",
+		`**Channel:** ${metadata.channel}`,
+		`**Published:** ${metadata.publicationDate}`,
+		`**Duration:** ${duration}`,
+		"",
+		"## Transcript",
+		"",
+		...transcript,
+	].join("\n");
+}
+
+async function fetchYouTubeCaptionTrack(
+	track: YouTubeCaptionTrack,
+	signal?: AbortSignal,
+): Promise<string[]> {
+	const timeoutSignal = AbortSignal.timeout(YOUTUBE_CAPTION_TIMEOUT_MS);
+	const requestSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+	const response = await fetchOwnedResponse(track.url, { headers: track.headers }, requestSignal);
+	if (!response.ok) {
+		await discardResponseBody(response, "YouTube caption request failed", requestSignal);
+		throw new Error(`YouTube caption request failed with HTTP ${response.status}`);
+	}
+	const output = await readResponseText(response, requestSignal, MAX_YOUTUBE_CAPTION_BYTES);
+	return parseYouTubeJson3Transcript(output);
+}
+
+async function tryYtDlpTranscript(
+	url: string,
+	signal: AbortSignal | undefined,
+	attemptErrors: string[],
+): Promise<ExtractedContent | null> {
+	try {
+		if (signal?.aborted) return null;
+		let stdout: string;
+		try {
+			const result = await execFileAsync("yt-dlp", [
+				"--no-warnings",
+				"--no-playlist",
+				"--skip-download",
+				"--write-subs",
+				"--write-auto-subs",
+				"--sub-langs", "en",
+				"--sub-format", "json3",
+				"--print", "%(.{title,channel,upload_date,duration,requested_subtitles})#j",
+				url,
+			], {
+				encoding: "utf8",
+				maxBuffer: 1024 * 1024,
+				timeout: YT_DLP_TRANSCRIPT_TIMEOUT_MS,
+				signal,
+			});
+			stdout = result.stdout;
+		} catch (error) {
+			throw new Error(mapYtDlpError(error), { cause: error });
+		}
+
+		const metadata = parseYtDlpTranscriptMetadata(stdout);
+		if (!metadata.caption) {
+			throw new Error("yt-dlp found no English captions for this video");
+		}
+		const transcript = await fetchYouTubeCaptionTrack(metadata.caption, signal);
+		return {
+			url,
+			title: metadata.title,
+			content: renderYouTubeTranscript(metadata, transcript),
+			error: null,
+			duration: metadata.durationSeconds ?? undefined,
+		};
+	} catch (err) {
+		if (!signal?.aborted) addAttemptError(attemptErrors, "Public transcript", err);
+		return null;
+	}
 }
 
 type StreamInfo = { streamUrl: string; duration: number | null };

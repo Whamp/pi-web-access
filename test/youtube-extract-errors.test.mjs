@@ -17,6 +17,7 @@ test("YouTube extraction surfaces Gemini API errors", async () => {
 		TEST_WEB_ACCESS_CONFIG: configPath,
 		HOME: home,
 		USERPROFILE: home,
+		PATH: "",
 		GEMINI_API_KEY: "test-gemini-key",
 		PERPLEXITY_API_KEY: "",
 	};
@@ -42,6 +43,7 @@ test("YouTube thumbnail retrieval settles on parent cancellation", async () => {
 		...process.env,
 		HOME: home,
 		USERPROFILE: home,
+		PATH: "",
 		GEMINI_API_KEY: "test-gemini-key",
 		PERPLEXITY_API_KEY: "",
 	};
