@@ -63,6 +63,32 @@ for (const documentCase of [
 	});
 }
 
+test("fetch_content reports the document byte limit when a convertible document exceeds its cap after abort", async () => {
+	const originalFetch = globalThis.fetch;
+	globalThis.fetch = async () => new Response(new ReadableStream({
+		start(controller) {
+			controller.enqueue(new Uint8Array(6 * 1024 * 1024));
+			controller.enqueue(new Uint8Array(6 * 1024 * 1024));
+			controller.enqueue(new Uint8Array(6 * 1024 * 1024));
+			controller.enqueue(new Uint8Array(6 * 1024 * 1024));
+		},
+	}), {
+		headers: {
+			"content-type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+		},
+	});
+
+	const controller = new AbortController();
+	const timeout = setTimeout(() => controller.abort(), 50);
+	try {
+		const result = await extractContent("https://example.test/large.docx", controller.signal, { lookup });
+		assert.match(result.error ?? "", /^Response too large \(limit 20MB\)/);
+	} finally {
+		clearTimeout(timeout);
+		globalThis.fetch = originalFetch;
+	}
+});
+
 test("fetch_content rejects a chunked response that exceeds the actual byte limit", async () => {
 	const originalFetch = globalThis.fetch;
 	let fetchCount = 0;
