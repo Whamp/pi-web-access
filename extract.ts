@@ -760,11 +760,11 @@ async function extractViaHttp(
 					error: null,
 				};
 			} catch (err) {
-				if (controller.signal.aborted) throw err;
 				if (err instanceof ResponseBodyTooLargeError) {
 					activityMonitor.logError(activityId, err.message);
-					return { url, title: "", content: "", error: responseTooLargeMessage(maxResponseBytes) };
+					return { url, title: "", content: "", error: responseTooLargeMessage(err.limitBytes) };
 				}
+				if (controller.signal.aborted) throw err;
 				const message = err instanceof Error ? err.message : String(err);
 				activityMonitor.logError(activityId, message);
 				return { url, title: "", content: "", error: `Document extraction failed: ${message}` };
@@ -867,7 +867,7 @@ async function extractViaHttp(
 	} catch (err) {
 		if (err instanceof ResponseBodyTooLargeError) {
 			activityMonitor.logError(activityId, err.message);
-			return { url, title: "", content: "", error: responseTooLargeMessage(MAX_RESPONSE_BYTES) };
+			return { url, title: "", content: "", error: responseTooLargeMessage(err.limitBytes) };
 		}
 		const message = err instanceof Error ? err.message : String(err);
 		if (message.toLowerCase().includes("abort")) {
